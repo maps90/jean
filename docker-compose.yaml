@@ -1,0 +1,42 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: jean
+      POSTGRES_PASSWORD: jean
+      POSTGRES_DB: jean
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U jean -d jean"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - jean_pgdata:/var/lib/postgresql/data
+
+  jean:
+    build: .
+    env_file:
+      - .env
+    environment:
+      JEAN_DATABASE_URL: postgresql://jean:jean@postgres:5432/jean
+    volumes:
+      - jean_home:/root/.jean
+    expose:
+      - "8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  jean_pgdata:
+  jean_home:
+
+# Horizontal scaling: jean is a stateless worker (see CLAUDE.md) -- all
+# session/approval state lives in Postgres, so you can run N identical
+# replicas behind the one Slack app:
+#
+#   docker compose up --scale jean=3
+#
+# No host ports are published for the `jean` service (health checks are
+# container-internal only) specifically so this scales without port
+# collisions between replicas.

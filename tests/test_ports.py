@@ -1,0 +1,95 @@
+from __future__ import annotations
+
+from contextlib import asynccontextmanager
+
+from jean.ports import ApprovalCoordinator, ChatSurface, SessionStore, ThreadLock
+
+
+class StubStore:
+    async def get_session(self, channel, thread_ts):
+        return None
+
+    async def upsert_session(
+        self,
+        channel,
+        thread_ts,
+        *,
+        sdk_session_id=None,
+        permission_mode=None,
+        engaged=None,
+        touch=True,
+    ):
+        return None
+
+    async def set_engaged(self, channel, thread_ts, value):
+        return None
+
+    async def is_engaged(self, channel, thread_ts):
+        return False
+
+
+class StubCoordinator:
+    async def create(self, approval_id, channel, thread_ts, summary):
+        return None
+
+    async def wait(self, approval_id, timeout):
+        raise NotImplementedError
+
+    async def resolve(self, approval_id, approved, by):
+        return True
+
+    async def set_approvers(self, approval_id, approvers):
+        return None
+
+    async def approvers_of(self, approval_id):
+        return set()
+
+    async def get_pending(self, approval_id):
+        return None
+
+
+class StubLock:
+    def __call__(self, channel, thread_ts):
+        return self._cm()
+
+    @asynccontextmanager
+    async def _cm(self):
+        yield
+
+
+class StubChat:
+    async def reply(self, channel, thread_ts, text):
+        return "ts"
+
+    async def edit(self, channel, ts, text):
+        return None
+
+    async def upload(
+        self, channel, thread_ts, *, path=None, content=None, filename, title=None, comment=None
+    ):
+        return None
+
+    async def react(self, channel, ts, emoji):
+        return None
+
+    async def unreact(self, channel, ts, emoji):
+        return None
+
+    async def set_status(self, channel, thread_ts, status):
+        return None
+
+
+def test_stub_store_satisfies_session_store_protocol():
+    assert isinstance(StubStore(), SessionStore)
+
+
+def test_stub_coordinator_satisfies_protocol():
+    assert isinstance(StubCoordinator(), ApprovalCoordinator)
+
+
+def test_stub_lock_satisfies_protocol():
+    assert isinstance(StubLock(), ThreadLock)
+
+
+def test_stub_chat_satisfies_protocol():
+    assert isinstance(StubChat(), ChatSurface)

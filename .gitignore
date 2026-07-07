@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.venv/
+.env
+*.db
+*.db-wal
+*.db-shm
+.jean/
+dist/
+.pytest_cache/
+.ruff_cache/
+.superpowers/
+.claude/
+.DS_Store

@@ -1,0 +1,235 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from jean.db.memory import MemoryStore
+from jean.session.session import JeanSession, RoutingContext
+
+
+@dataclass
+class FakeResultMessage:
+    session_id: str
+
+
+class FakeSdkClient:
+    """Stands in for ClaudeSDKClient: an async context manager whose
+    query()/receive_response() are driven by the test."""
+
+    instances: list[FakeSdkClient] = []
+
+    def __init__(self, *, options):
+        self.options = options
+        self.queried: list[str] = []
+        self.entered = False
+        self.exited = False
+        FakeSdkClient.instances.append(self)
+
+    async def __aenter__(self):
+        self.entered = True
+        return self
+
+    async def __aexit__(self, *exc_info):
+        self.exited = True
+
+    async def query(self, text: str) -> None:
+        self.queried.append(text)
+
+    async def receive_response(self):
+        yield FakeResultMessage(session_id="sdk-session-abc")
+
+
+class FakeChat:
+    def __init__(self):
+        self.statuses: list[tuple[str, str, str]] = []
+
+    async def set_status(self, channel, thread_ts, status):
+        self.statuses.append((channel, thread_ts, status))
+
+    async def reply(self, *a, **k):
+        raise NotImplementedError
+
+    async def edit(self, *a, **k):
+        raise NotImplementedError
+
+    async def upload(self, *a, **k):
+        raise NotImplementedError
+
+    async def react(self, *a, **k):
+        raise NotImplementedError
+
+    async def unreact(self, *a, **k):
+        raise NotImplementedError
+
+
+def _client_factory():
+    calls: list[dict] = []
+
+    def factory(*, options):
+        calls.append({"options": options})
+        return FakeSdkClient(options=options)
+
+    return factory, calls
+
+
+async def test_run_turn_persists_session_id_and_sets_status():
+    FakeSdkClient.instances.clear()
+    store = MemoryStore()
+    chat = FakeChat()
+    routing = RoutingContext()
+    factory, calls = _client_factory()
+
+    session = JeanSession(
+        "C1",
+        "111.0",
+        store=store,
+        chat=chat,
+        routing=routing,
+        options_factory=lambda resume: {"resume": resume},
+        client_factory=factory,
+    )
+
+    await session.run_turn("hello")
+
+    row = await store.get_session("C1", "111.0")
+    assert row.sdk_session_id == "sdk-session-abc"
+    assert calls[0]["options"] == {"resume": None}  # first turn: nothing to resume
+    assert routing.channel == "C1"
+    assert routing.thread_ts == "111.0"
+    assert ("C1", "111.0", "is thinking...") in chat.statuses
+
+
+async def test_run_turn_reuses_the_connected_client_across_turns():
+    FakeSdkClient.instances.clear()
+    store = MemoryStore()
+    chat = FakeChat()
+    routing = RoutingContext()
+    factory, calls = _client_factory()
+
+    session = JeanSession(
+        "C1",
+        "111.0",
+        store=store,
+        chat=chat,
+        routing=routing,
+        options_factory=lambda resume: {"resume": resume},
+        client_factory=factory,
+    )
+
+    await session.run_turn("hello")
+    await session.run_turn("again")
+
+    assert len(calls) == 1  # same JeanSession -> client built once, reused
+    assert FakeSdkClient.instances[0].queried == ["hello", "again"]
+
+
+async def test_second_turn_on_a_fresh_session_resumes_stored_id():
+    """Simulates a different worker (or a rebuilt cache entry) picking up the
+    same thread: resume must come from the store, not from any in-process
+    state."""
+    FakeSdkClient.instances.clear()
+    store = MemoryStore()
+    chat = FakeChat()
+
+    routing1 = RoutingContext()
+    factory1, calls1 = _client_factory()
+    session1 = JeanSession(
+        "C1",
+        "111.0",
+        store=store,
+        chat=chat,
+        routing=routing1,
+        options_factory=lambda resume: {"resume": resume},
+        client_factory=factory1,
+    )
+    await session1.run_turn("hello")
+    assert calls1[0]["options"] == {"resume": None}
+
+    routing2 = RoutingContext()
+    factory2, calls2 = _client_factory()
+    session2 = JeanSession(
+        "C1",
+        "111.0",
+        store=store,
+        chat=chat,
+        routing=routing2,
+        options_factory=lambda resume: {"resume": resume},
+        client_factory=factory2,
+    )
+    await session2.run_turn("continue")
+    assert calls2[0]["options"] == {"resume": "sdk-session-abc"}
+
+
+async def test_failed_turn_resets_client_to_none_and_next_turn_rebuilds():
+    """I3: a client whose first turn raises must not be left poisoned
+    (non-None and un-entered) -- the next run_turn should rebuild a fresh
+    client and resume from the stored sdk_session_id."""
+    FakeSdkClient.instances.clear()
+    store = MemoryStore()
+    chat = FakeChat()
+    routing = RoutingContext()
+
+    class ExplodingClient(FakeSdkClient):
+        async def query(self, text: str) -> None:
+            await super().query(text)
+            raise RuntimeError("boom")
+
+    calls: list[dict] = []
+
+    def factory(*, options):
+        calls.append({"options": options})
+        return ExplodingClient(options=options)
+
+    session = JeanSession(
+        "C1",
+        "111.0",
+        store=store,
+        chat=chat,
+        routing=routing,
+        options_factory=lambda resume: {"resume": resume},
+        client_factory=factory,
+    )
+
+    try:
+        await session.run_turn("hello")
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("expected the exploding turn to raise")
+
+    assert session._client is None
+    assert len(calls) == 1
+
+    # A session_id was never persisted (turn failed before receive_response),
+    # so the next factory call should be given the same stored resume (None).
+    def factory2(*, options):
+        calls.append({"options": options})
+        return FakeSdkClient(options=options)
+
+    session._client_factory = factory2
+    await session.run_turn("again")
+
+    assert len(calls) == 2
+    assert calls[1]["options"] == {"resume": None}
+    assert session._client is not None
+
+
+async def test_close_disconnects_the_client():
+    FakeSdkClient.instances.clear()
+    store = MemoryStore()
+    chat = FakeChat()
+    routing = RoutingContext()
+    factory, _calls = _client_factory()
+
+    session = JeanSession(
+        "C1",
+        "111.0",
+        store=store,
+        chat=chat,
+        routing=routing,
+        options_factory=lambda resume: {"resume": resume},
+        client_factory=factory,
+    )
+    await session.run_turn("hello")
+    await session.close()
+
+    assert FakeSdkClient.instances[0].exited is True

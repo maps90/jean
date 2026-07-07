@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: jean
+          POSTGRES_PASSWORD: jean
+          POSTGRES_DB: jean
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U jean -d jean"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # Exercises the asyncpg PostgresStore integration tests (see
+      # tests/test_postgres_store.py) -- they're skipped when this is unset,
+      # which is what keeps the default `uv run pytest` DB-free locally.
+      JEAN_TEST_DATABASE_URL: postgresql://jean:jean@localhost:5432/jean
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+      - name: Set up Python
+        run: uv python install 3.11
+      - name: Sync dependencies
+        run: uv sync
+      - name: Lint
+        run: uv run ruff check src tests
+      - name: Format check
+        run: uv run ruff format --check src tests
+      - name: Tests
+        run: uv run pytest -q

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from aiohttp.test_utils import TestClient, TestServer
 
+from jean import __version__
 from jean.health import make_health_app
 
 
@@ -10,6 +11,14 @@ async def test_healthz_returns_200():
     async with TestClient(TestServer(app)) as client:
         resp = await client.get("/healthz")
         assert resp.status == 200
+
+
+async def test_healthz_reports_running_version():
+    app = make_health_app(ready_check=lambda: _ready(True))
+    async with TestClient(TestServer(app)) as client:
+        resp = await client.get("/healthz")
+        body = await resp.json()
+        assert body["version"] == __version__
 
 
 async def test_readyz_returns_200_when_ready():

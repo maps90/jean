@@ -4,15 +4,18 @@ from collections.abc import Awaitable, Callable
 
 from aiohttp import web
 
+from jean import __version__
+
 
 def make_health_app(*, ready_check: Callable[[], Awaitable[bool]]) -> web.Application:
     """Liveness/readiness endpoints for the health-port server. `/healthz`
-    always answers if the process is up; `/readyz` runs `ready_check` (in
-    server.py, `store.ping`) so orchestrators can hold traffic until Postgres
-    is reachable."""
+    always answers if the process is up and reports the running `version` so
+    operators can confirm which build a replica is serving; `/readyz` runs
+    `ready_check` (in server.py, `store.ping`) so orchestrators can hold traffic
+    until Postgres is reachable."""
 
     async def healthz(_request: web.Request) -> web.Response:
-        return web.json_response({"status": "ok"})
+        return web.json_response({"status": "ok", "version": __version__})
 
     async def readyz(_request: web.Request) -> web.Response:
         ready = await ready_check()

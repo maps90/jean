@@ -88,6 +88,11 @@ class ThreadLock(Protocol):
 
 
 @runtime_checkable
+class MarketplaceResolver(Protocol):
+    async def resolve(self, entries: list[PluginRef]) -> list[ResolvedPlugin]: ...
+
+
+@runtime_checkable
 class ChatSurface(Protocol):
     async def reply(self, channel: str, thread_ts: str, text: str) -> str: ...
     async def edit(self, channel: str, ts: str, text: str) -> None: ...

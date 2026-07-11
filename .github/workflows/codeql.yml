@@ -1,0 +1,49 @@
+name: CodeQL
+
+# GitHub-native code scanning. Findings land in the Security > Code scanning tab
+# and are annotated inline on PRs. jean is pure Python (interpreted), so CodeQL
+# needs no build step -- build-mode: none analyses the source directly.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly re-scan so newly published CodeQL queries catch issues in code that
+    # hasn't changed. Monday 03:31 UTC (off the top of the hour to avoid load).
+    - cron: "31 3 * * 1"
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write   # upload SARIF results to code scanning
+      actions: read
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: python
+            build-mode: none
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+          # security-extended adds higher-signal security queries on top of the
+          # default set; drop to the default pack if it gets noisy.
+          queries: security-extended
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:${{ matrix.language }}"

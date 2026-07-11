@@ -1,12 +1,24 @@
 name: release
 
-# release-please watches conventional commits on main. When enough land it
-# opens/updates a "release" PR (version bump + CHANGELOG). Merging that PR tags
-# the commit and creates the GitHub Release, which in turn builds and pushes the
-# container image to GHCR. Nothing publishes until a release PR is merged.
+# Two ways to publish the container image to GHCR:
+#
+#  1. Automatic (release-please): conventional commits on main open a "release"
+#     PR (version bump + CHANGELOG); merging it tags the commit, creates the
+#     GitHub Release, and pushes the image for that version.
+#
+#  2. Manual button (workflow_dispatch): Actions tab -> "release" -> "Run
+#     workflow" -> enter a tag (e.g. 0.4.0) -> builds and pushes that tag +
+#     latest straight to GHCR, no release PR needed. Use this when the image
+#     just needs to ship and the release-please dance is in the way.
 on:
   push:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Image tag to build & push to GHCR (e.g. 0.4.0)"
+        required: true
+        default: "0.4.0"
 
 # Only ever one release run per branch; don't cancel a publish mid-flight.
 concurrency:
@@ -19,6 +31,8 @@ permissions:
 
 jobs:
   release-please:
+    # Only on a real push to main; skipped when the button is used.
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     outputs:
       release_created: ${{ steps.release.outputs.release_created }}
@@ -70,5 +84,38 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # Manual "release button" — build & push an image tag on demand, bypassing
+  # release-please. Triggered from the Actions tab (or `gh workflow run`).
+  manual-publish:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write      # push to ghcr.io
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}:${{ inputs.tag }}
+            ghcr.io/${{ github.repository }}:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max

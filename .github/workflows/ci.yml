@@ -48,10 +48,17 @@ jobs:
         run: uv run pytest -q
 
   # Build the image (no push) as a smoke test that the Dockerfile is sound.
-  # Runs only on pushes to main -- PRs skip it to stay fast; the actual GHCR
-  # push happens in the release workflow when a version is cut.
+  # Runs on pushes to main AND on the release-please PR (title "chore(main):
+  # release ...") so a broken Dockerfile blocks the release *before* it's
+  # tagged. Ordinary PRs skip it to stay fast; the actual GHCR push happens in
+  # the release workflow when a version is cut.
+  # Note: using the PR title in `if:` is injection-safe -- it's evaluated by the
+  # expression engine (startsWith), never interpolated into a shell command.
   docker-build:
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    if: >-
+      ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+          (github.event_name == 'pull_request' &&
+           startsWith(github.event.pull_request.title, 'chore(main): release')) }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

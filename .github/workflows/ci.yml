@@ -47,9 +47,11 @@ jobs:
       - name: Tests
         run: uv run pytest -q
 
-  # Build the image (no push) so a broken Dockerfile fails here, on the PR,
-  # rather than later when a merged release PR tries to publish to GHCR.
+  # Build the image (no push) as a smoke test that the Dockerfile is sound.
+  # Runs only on pushes to main -- PRs skip it to stay fast; the actual GHCR
+  # push happens in the release workflow when a version is cut.
   docker-build:
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

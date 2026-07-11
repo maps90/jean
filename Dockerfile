@@ -13,14 +13,17 @@ FROM python:3.11-slim
 # No separate `npm install -g @anthropic-ai/claude-code` step is required.
 # -----------------------------------------------------------------------------
 
-# Runtime deps for plugin loading (python:3.11-slim ships neither):
+# Runtime deps for plugin loading (python:3.11-slim ships none of these):
+#  - ca-certificates: TLS trust store for HTTPS — token clones over
+#          https://github.com, npx package downloads, and the Anthropic API.
+#  - curl: general fetch utility (health checks, ad-hoc debugging).
 #  - git:  GitMarketplaceResolver (jean.plugins) clones the marketplace repos
 #          named in jean.json at boot.
 #  - node/npm: oka-skills plugins bring `npx`-based MCP servers (e.g.
 #          mcp-server-kubernetes, @elastic/mcp-server-elasticsearch) that the
 #          agent SDK spawns on demand.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends git nodejs npm \
+    && apt-get install -y --no-install-recommends ca-certificates curl git nodejs npm \
     && rm -rf /var/lib/apt/lists/*
 
 RUN pip install --no-cache-dir uv

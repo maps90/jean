@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from urllib.parse import urlparse
 
 import pytest
 
@@ -58,7 +59,7 @@ async def test_clone_url_uses_https_token(tmp_path):
     r = GitMarketplaceResolver(token="ghp_secret", cache_dir=tmp_path, runner=runner)
     await r.resolve([PluginRef("git@github.com:OkadocTech/oka-skills.git", "grafana", "main")])
     clone = next(c for c in calls if c[0] == "clone")
-    url = next(a for a in clone if "github.com" in a)
+    url = next(a for a in clone if urlparse(a).hostname == "github.com")
     assert url == "https://x-access-token:ghp_secret@github.com/OkadocTech/oka-skills.git"
 
 

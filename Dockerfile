@@ -13,6 +13,13 @@ FROM python:3.11-slim
 # No separate `npm install -g @anthropic-ai/claude-code` step is required.
 # -----------------------------------------------------------------------------
 
+# `git` is a runtime dependency: GitMarketplaceResolver (jean.plugins) shells out
+# to `git` at boot to clone marketplace repos named in jean.json. python:3.11-slim
+# ships without it, so install it here.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN pip install --no-cache-dir uv
 
 WORKDIR /app

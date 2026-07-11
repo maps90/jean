@@ -55,6 +55,7 @@ Copy `.env.example` to `.env` and fill in:
 | `JEAN_DATABASE_URL` | yes (or rely on the compose default) | `postgresql://user:pass@host:5432/db` |
 | `JEAN_HOME` | no | defaults to `~/.jean` |
 | `JEAN_IDLE_MINUTES`, `JEAN_APPROVAL_TTL`, `JEAN_PERMISSION_MODE`, `JEAN_HEALTH_PORT`, `JEAN_MODEL`, `JEAN_SOUL_PARSE_MODEL` | no | see `.env.example` for defaults |
+| `JEAN_CLEANUP_ENABLED`, `JEAN_CLEANUP_RETENTION_DAYS` | no | weekly Postgres retention cleanup; prunes resolved approvals + idle sessions older than the window (default: enabled, 30 days). One worker prunes per week via an advisory lock. |
 
 Exactly one of `ANTHROPIC_API_KEY` / `CLAUDE_CODE_OAUTH_TOKEN` must be set --
 these two are the only unprefixed env vars, everything else is `JEAN_*`.

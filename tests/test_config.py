@@ -33,6 +33,16 @@ def test_defaults_resolve(clean_env):
     assert settings.database_url == "postgresql://jean:jean@localhost:5432/jean"
     assert settings.anthropic_api_key is None
     assert settings.claude_code_oauth_token is None
+    assert settings.cleanup_enabled is True
+    assert settings.cleanup_retention_days == 30
+
+
+def test_cleanup_settings_override(clean_env):
+    clean_env.setenv("JEAN_CLEANUP_ENABLED", "false")
+    clean_env.setenv("JEAN_CLEANUP_RETENTION_DAYS", "90")
+    settings = Settings.load()
+    assert settings.cleanup_enabled is False
+    assert settings.cleanup_retention_days == 90
 
 
 def test_home_expands_under_home_dir(clean_env):

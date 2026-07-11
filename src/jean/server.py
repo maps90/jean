@@ -15,6 +15,7 @@ from jean.config import Settings
 from jean.db.postgres import PostgresStore
 from jean.gateway.app import Gateway, register
 from jean.health import make_health_app
+from jean.maintenance.cleanup import CleanupScheduler
 from jean.persona.extract import load_soul_data
 from jean.persona.identity import compose_system_prompt, load_identity
 from jean.persona.model import SoulData
@@ -118,11 +119,18 @@ async def run() -> None:
     await site.start()
     logger.info("jean health server listening on :%d", settings.health_port)
 
-    try:
-        await asyncio.gather(
-            AsyncSocketModeHandler(app, settings.slack_app_token).start_async(),
-            manager.run_sweeper(),
+    tasks = [
+        AsyncSocketModeHandler(app, settings.slack_app_token).start_async(),
+        manager.run_sweeper(),
+    ]
+    if settings.cleanup_enabled:
+        scheduler = CleanupScheduler(
+            store, retention_seconds=settings.cleanup_retention_days * 86400
         )
+        tasks.append(scheduler.run())
+
+    try:
+        await asyncio.gather(*tasks)
     finally:
         await runner.cleanup()
         await store.close()

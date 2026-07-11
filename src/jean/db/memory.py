@@ -5,7 +5,7 @@ import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 
-from jean.ports import ApprovalDecision, SessionRow
+from jean.ports import ApprovalDecision, PruneResult, SessionRow
 
 
 @dataclass
@@ -18,6 +18,7 @@ class _ApprovalRow:
         default_factory=lambda: asyncio.get_running_loop().create_future()
     )
     decision: ApprovalDecision | None = None
+    resolved_at: float | None = None
 
 
 class MemoryStore:
@@ -32,6 +33,7 @@ class MemoryStore:
         self._sessions: dict[tuple[str, str], SessionRow] = {}
         self._locks: dict[tuple[str, str], asyncio.Lock] = {}
         self._approvals: dict[str, _ApprovalRow] = {}
+        self._last_cleanup: float | None = None
 
     # ---- SessionStore ----
     async def get_session(self, channel: str, thread_ts: str) -> SessionRow | None:
@@ -131,6 +133,7 @@ class MemoryStore:
         except TimeoutError:
             decision = ApprovalDecision(False, "system")
             row.decision = decision
+            row.resolved_at = time.time()
             if not row.future.done():
                 row.future.set_result(decision)
             return decision
@@ -142,5 +145,30 @@ class MemoryStore:
             return False
         decision = ApprovalDecision(approved, by)
         row.decision = decision
+        row.resolved_at = time.time()
         row.future.set_result(decision)
+        return True
+
+    # ---- MaintenanceStore ----
+    async def prune(self, older_than: float) -> PruneResult:
+        # Resolved approvals (resolved_at set) whose resolution predates the
+        # cutoff; pending rows have resolved_at=None and are never pruned.
+        stale_appr = [
+            aid
+            for aid, row in self._approvals.items()
+            if row.resolved_at is not None and row.resolved_at < older_than
+        ]
+        for aid in stale_appr:
+            del self._approvals[aid]
+        stale_sess = [key for key, row in self._sessions.items() if row.last_active_at < older_than]
+        for key in stale_sess:
+            del self._sessions[key]
+        return PruneResult(approvals_deleted=len(stale_appr), sessions_deleted=len(stale_sess))
+
+    async def try_claim_cleanup(self, min_interval: float) -> bool:
+        # Single process: no cross-worker lock needed, just an interval gate.
+        now = time.time()
+        if self._last_cleanup is not None and now - self._last_cleanup < min_interval:
+            return False
+        self._last_cleanup = now
         return True

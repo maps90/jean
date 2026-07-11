@@ -123,3 +123,52 @@ async def assert_coordinator_stores_approvers_and_pending(coordinator) -> None:
     assert pending == ("C9", "999.0", "deploy the thing")
 
     assert await coordinator.get_pending("missing-id") is None
+
+
+async def assert_prune_removes_resolved_approvals_and_stale_sessions(store) -> None:
+    """prune(older_than) deletes resolved approvals and sessions last active
+    before the cutoff, leaving pending approvals untouched. `older_than` is an
+    absolute epoch cutoff -- a row is stale iff its timestamp is < cutoff."""
+    import time
+
+    # A resolved approval and a touched session both timestamped ~now.
+    await store.create("appr-old", "C1", "1.0", "old work")
+    await store.resolve("appr-old", True, "U1")
+    await store.upsert_session("C1", "1.0", sdk_session_id="sdk-old")
+    # A still-pending approval -- must never be pruned regardless of age.
+    await store.create("appr-pending", "C2", "2.0", "awaiting a human")
+
+    # A cutoff in the far future makes every timestamped row look stale.
+    result = await store.prune(older_than=time.time() + 1000)
+    assert result.approvals_deleted == 1
+    assert result.sessions_deleted == 1
+    # Resolved approval + stale session gone; pending approval survives.
+    assert await store.get_pending("appr-old") is None
+    assert await store.get_session("C1", "1.0") is None
+    assert await store.get_pending("appr-pending") == ("C2", "2.0", "awaiting a human")
+
+
+async def assert_prune_keeps_recent_rows(store) -> None:
+    """A cutoff in the past deletes nothing -- recent rows survive."""
+    import time
+
+    await store.create("appr-fresh", "C1", "1.0", "fresh work")
+    await store.resolve("appr-fresh", True, "U1")
+    await store.upsert_session("C1", "1.0", sdk_session_id="sdk-fresh")
+
+    result = await store.prune(older_than=time.time() - 1000)
+    assert result.approvals_deleted == 0
+    assert result.sessions_deleted == 0
+    assert await store.get_pending("appr-fresh") == ("C1", "1.0", "fresh work")
+    assert await store.get_session("C1", "1.0") is not None
+
+
+async def assert_try_claim_cleanup_gates_on_interval(store) -> None:
+    """The first claim wins; a second claim within the interval is refused;
+    once the interval has elapsed (min_interval=0), a claim wins again. This
+    is what makes exactly one worker prune per period."""
+    assert await store.try_claim_cleanup(min_interval=1000) is True
+    # Just claimed -- not due again for another ~1000s.
+    assert await store.try_claim_cleanup(min_interval=1000) is False
+    # A zero interval is always due, so the next claim succeeds.
+    assert await store.try_claim_cleanup(min_interval=0) is True

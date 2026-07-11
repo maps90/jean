@@ -21,6 +21,12 @@ class ApprovalDecision:
     by: str
 
 
+@dataclass
+class PruneResult:
+    approvals_deleted: int
+    sessions_deleted: int
+
+
 @runtime_checkable
 class SessionStore(Protocol):
     async def get_session(self, channel: str, thread_ts: str) -> SessionRow | None: ...
@@ -52,6 +58,15 @@ class ApprovalCoordinator(Protocol):
     async def get_pending(
         self, approval_id: str
     ) -> tuple[str, str, str] | None: ...  # (channel, thread_ts, summary)
+
+
+@runtime_checkable
+class MaintenanceStore(Protocol):
+    """Periodic retention cleanup. `prune` deletes rows older than a cutoff;
+    `try_claim_cleanup` gates a run so exactly one worker prunes each period."""
+
+    async def prune(self, older_than: float) -> PruneResult: ...
+    async def try_claim_cleanup(self, min_interval: float) -> bool: ...
 
 
 @runtime_checkable

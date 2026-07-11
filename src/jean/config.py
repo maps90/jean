@@ -31,6 +31,11 @@ class Settings(BaseSettings):
     model: str | None = None
     soul_parse_model: str = "claude-haiku-4-5-20251001"
 
+    # Weekly Postgres retention cleanup: prune resolved approvals and sessions
+    # idle longer than the retention window. Set cleanup_enabled=false to skip.
+    cleanup_enabled: bool = True
+    cleanup_retention_days: int = 30
+
     @classmethod
     def load(cls) -> Settings:
         """Build Settings, wiring the two unprefixed auth env vars in."""

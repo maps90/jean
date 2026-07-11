@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 
 import asyncpg
 
-from jean.ports import ApprovalDecision, SessionRow
+from jean.ports import ApprovalDecision, PruneResult, SessionRow
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (
@@ -21,6 +21,8 @@ CREATE TABLE IF NOT EXISTS approvals (
   approvers text[] NOT NULL DEFAULT '{}',
   requested_at double precision NOT NULL DEFAULT extract(epoch from now()),
   resolved_at double precision);
+CREATE TABLE IF NOT EXISTS maintenance (
+  job text PRIMARY KEY, last_run double precision NOT NULL DEFAULT 0);
 """
 
 
@@ -201,3 +203,42 @@ class PostgresStore:
             return False
         await self._pool.execute("SELECT pg_notify('jean_approvals', $1)", approval_id)
         return True
+
+    # ---- MaintenanceStore ----  weekly retention cleanup
+    async def prune(self, older_than: float) -> PruneResult:
+        # One transaction so the two deletes commit together. Resolved
+        # approvals carry resolved_at; pending rows have it NULL and are never
+        # matched (NULL < cutoff is NULL) -- mirrors MemoryStore exactly.
+        async with self._pool.acquire() as c, c.transaction():
+            appr = await c.execute(
+                "DELETE FROM approvals WHERE resolved_at IS NOT NULL AND resolved_at < $1",
+                older_than,
+            )
+            sess = await c.execute("DELETE FROM sessions WHERE last_active_at < $1", older_than)
+        # asyncpg returns a command tag like "DELETE 3"; the count is the tail.
+        return PruneResult(
+            approvals_deleted=int(appr.split()[-1]),
+            sessions_deleted=int(sess.split()[-1]),
+        )
+
+    async def try_claim_cleanup(self, min_interval: float) -> bool:
+        # Cross-worker gate: a non-blocking advisory *xact* lock means only one
+        # worker holds the claim at a time (the rest return False and skip),
+        # and the durable maintenance.last_run row enforces the interval so a
+        # restart doesn't re-run early. Lock auto-releases on commit.
+        async with self._pool.acquire() as c, c.transaction():
+            got = await c.fetchval("SELECT pg_try_advisory_xact_lock(hashtext('jean_cleanup'))")
+            if not got:
+                return False
+            await c.execute("INSERT INTO maintenance(job) VALUES('cleanup') ON CONFLICT DO NOTHING")
+            due = await c.fetchval(
+                "SELECT extract(epoch from now()) - last_run >= $1 "
+                "FROM maintenance WHERE job='cleanup'",
+                min_interval,
+            )
+            if not due:
+                return False
+            await c.execute(
+                "UPDATE maintenance SET last_run=extract(epoch from now()) WHERE job='cleanup'"
+            )
+            return True

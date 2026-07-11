@@ -98,7 +98,9 @@ class GitMarketplaceResolver:
             await self._run(
                 ["-C", str(dest), "remote", "set-url", "origin", tokenless], self._cache_dir
             )
-            await self._run(["-C", str(dest), "checkout", e.ref], self._cache_dir)
+            await self._run(
+                ["-C", str(dest), "checkout", "--end-of-options", e.ref], self._cache_dir
+            )
         return dest
 
     def _validate(self, clone: Path, plugin_dir: Path, e: PluginRef) -> None:

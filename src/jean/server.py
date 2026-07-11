@@ -3,13 +3,13 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
-from typing import Any
 
 from aiohttp import web
-from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, PermissionResultAllow
+from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
 from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
 from slack_bolt.async_app import AsyncApp
 
+from jean.agent_options import build_agent_options
 from jean.approval.gate import ApprovalGate
 from jean.config import Settings
 from jean.db.postgres import PostgresStore
@@ -17,8 +17,10 @@ from jean.gateway.app import Gateway, register
 from jean.health import make_health_app
 from jean.maintenance.cleanup import CleanupScheduler
 from jean.persona.extract import load_soul_data
-from jean.persona.identity import compose_system_prompt, load_identity
+from jean.persona.identity import load_identity
 from jean.persona.model import SoulData
+from jean.plugins.git_resolver import GitMarketplaceResolver
+from jean.plugins.manifest import load_mcp_config, load_plugin_manifest
 from jean.session.manager import SessionManager
 from jean.session.session import JeanSession, RoutingContext
 from jean.slack.client import SlackSurface
@@ -33,13 +35,6 @@ class _SoulCell:
     SoulData (a seam for a future hot-reload command; v1 loads it once)."""
 
     soul: SoulData
-
-
-async def _allow_all_tools(
-    tool_name: str, tool_input: dict[str, Any], context: Any
-) -> PermissionResultAllow:
-    del tool_name, tool_input, context  # v1: the gate + persona are the discipline, not the SDK
-    return PermissionResultAllow()
 
 
 async def run() -> None:
@@ -78,16 +73,21 @@ async def run() -> None:
         chat, gate, channel_of=lambda: routing.channel, thread_of=lambda: routing.thread_ts
     )
 
+    extra_mcp = load_mcp_config(settings.mcp_config_path)
+    resolver = GitMarketplaceResolver(
+        token=settings.marketplace_token, cache_dir=settings.marketplace_cache_dir
+    )
+    plugins = await resolver.resolve(load_plugin_manifest(settings.plugins_path))
+
     def options_factory(resume: str | None) -> ClaudeAgentOptions:
-        return ClaudeAgentOptions(
-            system_prompt=compose_system_prompt(persona_text),
-            mcp_servers={"jean_slack": server_mcp},
-            allowed_tools=tool_names,
-            permission_mode=settings.permission_mode,
-            can_use_tool=_allow_all_tools,
+        return build_agent_options(
+            persona_text=persona_text,
+            slack_server=server_mcp,
+            slack_tool_names=tool_names,
+            extra_mcp=extra_mcp,
+            plugins=plugins,
+            settings=settings,
             resume=resume,
-            model=settings.model,
-            cwd=str(settings.home / "workspaces"),
         )
 
     def session_factory(channel: str, thread_ts: str) -> JeanSession:

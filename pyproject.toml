@@ -48,4 +48,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/*" = ["B011"]  # allow assert False patterns in tests
+"tests/*" = [
+    "B011",     # allow assert False patterns in tests
+    "ASYNC240", # sync Path I/O on tmp_path fixtures in async tests is fine (no real blocking I/O)
+]

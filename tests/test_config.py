@@ -64,3 +64,25 @@ def test_database_url_override(clean_env):
     clean_env.setenv("JEAN_DATABASE_URL", "postgresql://x:y@host:5432/db")
     settings = Settings.load()
     assert settings.database_url == "postgresql://x:y@host:5432/db"
+
+
+def test_external_paths_default_under_home(clean_env):
+    clean_env.setenv("JEAN_HOME", "~/.jean")
+    settings = Settings.load()
+    assert settings.identity_path == Path.home() / ".jean" / "IDENTITY.md"
+    assert settings.mcp_config_path == Path.home() / ".jean" / "mcp.json"
+    assert settings.plugins_path == Path.home() / ".jean" / "jean.json"
+    assert settings.marketplace_cache_dir == Path.home() / ".jean" / "marketplaces"
+    assert settings.marketplace_token is None
+
+
+def test_external_paths_override(clean_env):
+    clean_env.setenv("JEAN_IDENTITY_PATH", "/etc/jean/soul.md")
+    clean_env.setenv("JEAN_PLUGINS_PATH", "/etc/jean/jean.json")
+    clean_env.setenv("JEAN_MCP_CONFIG_PATH", "/etc/jean/mcp.json")
+    clean_env.setenv("JEAN_MARKETPLACE_TOKEN", "ghp_abc")
+    settings = Settings.load()
+    assert settings.identity_path == Path("/etc/jean/soul.md")
+    assert settings.plugins_path == Path("/etc/jean/jean.json")
+    assert settings.mcp_config_path == Path("/etc/jean/mcp.json")
+    assert settings.marketplace_token == "ghp_abc"

@@ -27,6 +27,19 @@ class PruneResult:
     sessions_deleted: int
 
 
+@dataclass
+class PluginRef:
+    marketplace: str
+    plugin: str
+    ref: str
+
+
+@dataclass
+class ResolvedPlugin:
+    name: str
+    path: str
+
+
 @runtime_checkable
 class SessionStore(Protocol):
     async def get_session(self, channel: str, thread_ts: str) -> SessionRow | None: ...

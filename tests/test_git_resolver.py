@@ -62,6 +62,15 @@ async def test_clone_url_uses_https_token(tmp_path):
     assert url == "https://x-access-token:ghp_secret@github.com/OkadocTech/oka-skills.git"
 
 
+def test_scrub_removes_token():
+    from jean.plugins.git_resolver import _scrub
+
+    leaked = "fatal: unable to access 'https://x-access-token:ghp_secret123@github.com/o/r.git/'"
+    out = _scrub(leaked)
+    assert "ghp_secret123" not in out
+    assert "x-access-token:***@" in out
+
+
 async def test_missing_plugin_raises(tmp_path):
     runner, _ = _make_fake_runner(["grafana"])  # marketplace lacks "elasticsearch"
     r = GitMarketplaceResolver(token=None, cache_dir=tmp_path, runner=runner)

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import re
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -13,6 +14,19 @@ GitRunner = Callable[[list[str], Path], Awaitable[None]]
 
 # git@github.com:ORG/repo.git  or  https://github.com/ORG/repo.git
 _GH = re.compile(r"^(?:git@github\.com:|https://github\.com/)(?P<path>.+?)(?:\.git)?$")
+
+_TOKEN_URL = re.compile(r"x-access-token:[^@/\s]+@")
+
+
+def _scrub(text: str) -> str:
+    """Redact any `x-access-token:<token>@` credential URL fragment.
+
+    Token-agnostic (no token argument needed): git's verbose tracing
+    (GIT_TRACE / GIT_CURL_VERBOSE / GIT_TRACE_CURL) can echo the full
+    credentialed clone URL to stderr, which would otherwise land verbatim
+    in exception messages and logs.
+    """
+    return _TOKEN_URL.sub("x-access-token:***@", text)
 
 
 def _auth_url(marketplace: str, token: str | None) -> str:
@@ -29,16 +43,22 @@ def _clone_key(marketplace: str, ref: str) -> str:
 
 
 async def _default_git_run(args: list[str], cwd: Path) -> None:
+    env = dict(os.environ)
+    for key in [k for k in env if k.startswith("GIT_TRACE")]:
+        del env[key]
+    env.pop("GIT_CURL_VERBOSE", None)
+    env["GIT_TERMINAL_PROMPT"] = "0"
     proc = await asyncio.create_subprocess_exec(
         "git",
         *args,
         cwd=str(cwd),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        env=env,
     )
     _, err = await proc.communicate()
     if proc.returncode != 0:
-        raise RuntimeError(f"git {args[0]} failed: {err.decode(errors='replace')}")
+        raise RuntimeError(f"git {args[0]} failed: {_scrub(err.decode(errors='replace'))}")
 
 
 class GitMarketplaceResolver:

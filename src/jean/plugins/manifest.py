@@ -11,6 +11,8 @@ def load_plugin_manifest(path: Path) -> list[PluginRef]:
     if not path.exists():
         return []
     data = json.loads(path.read_text())
+    if not isinstance(data, dict):
+        raise ValueError("jean.json must be a JSON object")
     entries = data.get("plugins", [])
     refs: list[PluginRef] = []
     for e in entries:
@@ -25,6 +27,8 @@ def load_mcp_config(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
     data = json.loads(path.read_text())
+    if not isinstance(data, dict):
+        raise ValueError("mcp.json must be a JSON object")
     servers = data.get("mcpServers", {})
     if not isinstance(servers, dict):
         raise ValueError("mcp.json 'mcpServers' must be an object")

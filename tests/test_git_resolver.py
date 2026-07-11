@@ -71,6 +71,14 @@ def test_scrub_removes_token():
     assert "x-access-token:***@" in out
 
 
+async def test_clone_checks_out_ref(tmp_path):
+    runner, calls = _make_fake_runner(["grafana"])
+    r = GitMarketplaceResolver(token="ghp_x", cache_dir=tmp_path, runner=runner)
+    await r.resolve([PluginRef("git@github.com:OkadocTech/oka-skills.git", "grafana", "v1.2.3")])
+    checkout = next(c for c in calls if "checkout" in c)
+    assert checkout[-1] == "v1.2.3"
+
+
 async def test_missing_plugin_raises(tmp_path):
     runner, _ = _make_fake_runner(["grafana"])  # marketplace lacks "elasticsearch"
     r = GitMarketplaceResolver(token=None, cache_dir=tmp_path, runner=runner)

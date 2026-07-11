@@ -75,7 +75,9 @@ class MarketplaceResolver(Protocol):
 
 - Dedupes entries by `(marketplace, ref)`, shallow-clones each unique repo once
   into a cache dir (`JEAN_MARKETPLACE_CACHE_DIR`, default `<home>/marketplaces`),
-  keyed by a hash of `(marketplace, ref)`.
+  keyed by a hash of `(marketplace, ref)`. A resolved `(marketplace, ref)` clone
+  is cached on disk and is **not** refreshed on later boots, so operators should
+  pin `ref` to an immutable tag or commit SHA for deterministic rollouts.
 - Rewrites `git@github.com:ORG/repo.git` (and `https://github.com/ORG/repo.git`)
   to `https://x-access-token:${JEAN_MARKETPLACE_TOKEN}@github.com/ORG/repo.git`.
   The token is **never** logged and never written into the cache path.

@@ -89,14 +89,16 @@ class GitMarketplaceResolver:
         dest = self._cache_dir / _clone_key(e.marketplace, e.ref)
         if not (dest / ".git").exists():
             url = _auth_url(e.marketplace, self._token)
-            await self._run(
-                ["clone", "--depth", "1", "--branch", e.ref, url, str(dest)], self._cache_dir
-            )
+            # Full clone (not --depth/--branch) so `ref` may be a branch, tag,
+            # OR a commit SHA -- GitHub's smart HTTP won't fetch an arbitrary
+            # shallow SHA, so we clone then check the ref out explicitly.
+            await self._run(["clone", url, str(dest)], self._cache_dir)
             # Strip the token from the persisted remote so it never lingers on disk.
             tokenless = _auth_url(e.marketplace, None)
             await self._run(
                 ["-C", str(dest), "remote", "set-url", "origin", tokenless], self._cache_dir
             )
+            await self._run(["-C", str(dest), "checkout", e.ref], self._cache_dir)
         return dest
 
     def _validate(self, clone: Path, plugin_dir: Path, e: PluginRef) -> None:

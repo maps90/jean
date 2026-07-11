@@ -39,6 +39,20 @@ def test_load_plugin_manifest_rejects_missing_field(tmp_path):
         load_plugin_manifest(p)
 
 
+def test_load_plugin_manifest_rejects_non_object(tmp_path):
+    p = tmp_path / "jean.json"
+    p.write_text(json.dumps([1, 2, 3]))
+    with pytest.raises(ValueError):
+        load_plugin_manifest(p)
+
+
+def test_load_mcp_config_rejects_non_object(tmp_path):
+    p = tmp_path / "mcp.json"
+    p.write_text(json.dumps([1, 2, 3]))
+    with pytest.raises(ValueError):
+        load_mcp_config(p)
+
+
 def test_load_mcp_config_returns_servers_map(tmp_path):
     p = tmp_path / "mcp.json"
     p.write_text(

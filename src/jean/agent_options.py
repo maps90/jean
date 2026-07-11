@@ -2,16 +2,16 @@ from __future__ import annotations
 
 from typing import Any
 
-from claude_agent_sdk import ClaudeAgentOptions
+from claude_agent_sdk import ClaudeAgentOptions, PermissionResultAllow
 
 from jean.config import Settings
 from jean.persona.identity import compose_system_prompt
 from jean.ports import ResolvedPlugin
 
 
-async def _allow_all_tools(tool_name: str, tool_input: dict[str, Any], context: Any):
-    from claude_agent_sdk import PermissionResultAllow
-
+async def _allow_all_tools(
+    tool_name: str, tool_input: dict[str, Any], context: Any
+) -> PermissionResultAllow:
     del tool_name, tool_input, context
     return PermissionResultAllow()
 

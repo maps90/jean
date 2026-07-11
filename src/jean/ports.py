@@ -27,6 +27,19 @@ class PruneResult:
     sessions_deleted: int
 
 
+@dataclass
+class PluginRef:
+    marketplace: str
+    plugin: str
+    ref: str
+
+
+@dataclass
+class ResolvedPlugin:
+    name: str
+    path: str
+
+
 @runtime_checkable
 class SessionStore(Protocol):
     async def get_session(self, channel: str, thread_ts: str) -> SessionRow | None: ...
@@ -72,6 +85,11 @@ class MaintenanceStore(Protocol):
 @runtime_checkable
 class ThreadLock(Protocol):
     def __call__(self, channel: str, thread_ts: str) -> AbstractAsyncContextManager[None]: ...
+
+
+@runtime_checkable
+class MarketplaceResolver(Protocol):
+    async def resolve(self, entries: list[PluginRef]) -> list[ResolvedPlugin]: ...
 
 
 @runtime_checkable

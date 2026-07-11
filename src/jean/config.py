@@ -31,6 +31,13 @@ class Settings(BaseSettings):
     model: str | None = None
     soul_parse_model: str = "claude-haiku-4-5-20251001"
 
+    # External file paths (mountable from a Secret); default under home.
+    identity_path: Path | None = None
+    mcp_config_path: Path | None = None
+    plugins_path: Path | None = None
+    marketplace_cache_dir: Path | None = None
+    marketplace_token: str | None = None
+
     # Weekly Postgres retention cleanup: prune resolved approvals and sessions
     # idle longer than the retention window. Set cleanup_enabled=false to skip.
     cleanup_enabled: bool = True
@@ -51,10 +58,12 @@ class Settings(BaseSettings):
     def __init__(self, **data: object) -> None:
         super().__init__(**data)
         self.home = self.home.expanduser()
-
-    @property
-    def identity_path(self) -> Path:
-        return self.home / "IDENTITY.md"
+        self.identity_path = (self.identity_path or self.home / "IDENTITY.md").expanduser()
+        self.mcp_config_path = (self.mcp_config_path or self.home / "mcp.json").expanduser()
+        self.plugins_path = (self.plugins_path or self.home / "jean.json").expanduser()
+        self.marketplace_cache_dir = (
+            self.marketplace_cache_dir or self.home / "marketplaces"
+        ).expanduser()
 
     @property
     def cache_dir(self) -> Path:

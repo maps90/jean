@@ -160,6 +160,41 @@ async def test_preflight_retries_a_failed_load_and_recovers():
     assert len(attempts) == 2, "it must stop retrying once the server is up"
 
 
+async def test_a_missing_command_is_not_retried():
+    """Seen in production: the grafana plugin runs its server via `docker`, which
+    the image does not have. A command that is absent will not appear on the
+    second attempt -- retrying it only stalls the boot it runs in front of."""
+    spawns = []
+
+    async def spawn(config):
+        spawns.append(config)
+        raise FileNotFoundError(2, "No such file or directory", "docker")
+
+    results = await preflight({"grafana": {"command": "docker"}}, spawn=spawn, attempts=3, delay=0)
+
+    assert not results[0].connected
+    assert results[0].attempts == 1
+    assert "docker" in results[0].error
+    assert len(spawns) == 1, "a missing binary must not be retried"
+
+
+async def test_a_transient_failure_is_still_retried():
+    """The distinction that matters: the server started and then died, which is
+    what a cold npx does -- that one recovers on a second attempt."""
+    spawns = []
+
+    async def spawn(config):
+        spawns.append(config)
+        if len(spawns) == 1:
+            return FakeProc(stderr="sh: 1: kubernetes-mcp-server: not found\n")
+        return FakeProc(tools=["pods_list"])
+
+    results = await preflight({"kubernetes": {"command": "npx"}}, spawn=spawn, attempts=3, delay=0)
+
+    assert results[0].connected
+    assert len(spawns) == 2
+
+
 async def test_preflight_gives_up_on_a_permanently_broken_server_without_killing_boot():
     async def spawn(config):
         return FakeProc(stderr="sh: 1: mcp-server-elasticsearch: not found\n")
@@ -193,3 +228,47 @@ async def test_preflight_logs_what_loaded_and_what_did_not(caplog):
     assert "2 tools" in caplog.text
     assert "elasticsearch" in caplog.text
     assert "mcp-server-elasticsearch: not found" in caplog.text
+
+
+async def test_preflight_ends_with_a_score_naming_both_sides(caplog):
+    """One line an operator can read at a glance: how many came up, which ones,
+    and which did not -- without reassembling it from the per-server warnings."""
+
+    async def spawn(config):
+        if config["command"] == "docker":
+            raise FileNotFoundError(2, "No such file or directory", "docker")
+        if config["command"] == "broken":
+            return FakeProc(stderr="boom\n")
+        return FakeProc(tools=["pods_list", "pods_log"])
+
+    with caplog.at_level(logging.INFO, logger="jean.plugins.mcp_probe"):
+        results = await preflight(
+            {
+                "kubectl:kubernetes": {"command": "npx"},
+                "elasticsearch:elasticsearch": {"command": "npx"},
+                "grafana:grafana": {"command": "docker"},
+                "flaky:flaky": {"command": "broken"},
+            },
+            spawn=spawn,
+            attempts=1,
+            delay=0,
+        )
+
+    summary = [r.message for r in caplog.records if "connected:" in r.message][0]
+    assert "2/4 MCP servers connected" in summary
+    assert "kubectl:kubernetes (2 tools)" in summary
+    assert "elasticsearch:elasticsearch (2 tools)" in summary
+    assert "failed: grafana:grafana, flaky:flaky" in summary
+    assert sum(r.connected for r in results) == 2
+
+
+async def test_the_score_says_so_when_every_server_is_up(caplog):
+    async def spawn(config):
+        return FakeProc(tools=["pods_list"])
+
+    with caplog.at_level(logging.INFO, logger="jean.plugins.mcp_probe"):
+        await preflight({"kubectl:kubernetes": {"command": "npx"}}, spawn=spawn, attempts=1)
+
+    summary = [r.message for r in caplog.records if "connected:" in r.message][0]
+    assert "1/1 MCP servers connected" in summary
+    assert "failed" not in summary

@@ -33,6 +33,10 @@ class ProbeResult:
     tool_count: int = 0
     error: str | None = None
     attempts: int = 1
+    # A server that could not even be *started* -- its command does not exist --
+    # will not start on the next attempt either. Only failures after a successful
+    # spawn (a cold `npx` that dies mid-fetch, a slow handshake) are worth a retry.
+    retryable: bool = True
 
 
 class McpProcess(Protocol):
@@ -146,7 +150,18 @@ async def probe_server(
     """Spawn one MCP server and complete a real handshake with it."""
     proc: McpProcess | None = None
     try:
-        proc = await spawn(config)
+        try:
+            proc = await spawn(config)
+        except (FileNotFoundError, PermissionError) as exc:
+            # The command itself is missing or unrunnable (the grafana plugin asks
+            # for `docker`, which the image has not got). No retry will conjure it.
+            return ProbeResult(
+                name,
+                connected=False,
+                error=f"cannot run {config.get('command')!r}: {exc.strerror or exc}",
+                attempts=attempt,
+                retryable=False,
+            )
         tool_count = await asyncio.wait_for(_handshake(proc), timeout)
         return ProbeResult(name, connected=True, tool_count=tool_count, attempts=attempt)
     except TimeoutError:
@@ -184,7 +199,7 @@ async def preflight(
     if not servers:
         return []
     logger.info("probing %d MCP server(s)", len(servers))
-    return list(
+    results = list(
         await asyncio.gather(
             *(
                 _probe_with_retry(
@@ -194,6 +209,24 @@ async def preflight(
             )
         )
     )
+    _log_summary(results)
+    return results
+
+
+def _log_summary(results: list[ProbeResult]) -> None:
+    """The one line an operator reads: the score, and both sides of it by name.
+
+    Without it the outcome is scattered across per-server warnings, and "which
+    tools does jean actually have right now" becomes a reassembly job.
+    """
+    up = [r for r in results if r.connected]
+    down = [r for r in results if not r.connected]
+    connected = ", ".join(f"{r.server} ({r.tool_count} tools)" for r in up) or "none"
+    summary = f"{len(up)}/{len(results)} MCP servers connected: {connected}"
+    if down:
+        summary += " -- failed: " + ", ".join(r.server for r in down)
+    log = logger.info if not down else logger.warning
+    log(summary)
 
 
 async def _probe_with_retry(
@@ -216,6 +249,9 @@ async def _probe_with_retry(
                 attempt,
                 attempts,
             )
+            return result
+        if not result.retryable:
+            logger.warning("mcp %s: %s -- its tools will be unavailable", name, result.error)
             return result
         if attempt < attempts:
             logger.warning(

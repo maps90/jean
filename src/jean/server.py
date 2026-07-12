@@ -43,7 +43,11 @@ async def run() -> None:
     settings.cache_dir.mkdir(parents=True, exist_ok=True)
     (settings.home / "workspaces").mkdir(parents=True, exist_ok=True)
 
-    store = await PostgresStore.connect(settings.database_url)
+    store = await PostgresStore.connect(
+        settings.database_url,
+        min_size=settings.db_pool_min,
+        max_size=settings.db_pool_max,
+    )
 
     persona_text = load_identity(settings.identity_path)
     cell = _SoulCell(soul=await load_soul_data(settings))

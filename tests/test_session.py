@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from claude_agent_sdk import ProcessError
+
 from jean.db.memory import MemoryStore
 from jean.session.session import JeanSession, RoutingContext
 
@@ -41,12 +43,14 @@ class FakeSdkClient:
 class FakeChat:
     def __init__(self):
         self.statuses: list[tuple[str, str, str]] = []
+        self.replies: list[tuple[str, str, str]] = []
 
     async def set_status(self, channel, thread_ts, status):
         self.statuses.append((channel, thread_ts, status))
 
-    async def reply(self, *a, **k):
-        raise NotImplementedError
+    async def reply(self, channel, thread_ts, text):
+        self.replies.append((channel, thread_ts, text))
+        return "999.0"
 
     async def edit(self, *a, **k):
         raise NotImplementedError
@@ -233,3 +237,95 @@ async def test_close_disconnects_the_client():
     await session.close()
 
     assert FakeSdkClient.instances[0].exited is True
+
+
+async def test_stale_resume_falls_back_to_a_fresh_session():
+    """The claude CLI keeps each conversation's transcript on the local
+    filesystem while jean persists only the id in Postgres, so a restarted pod
+    (or a second replica) resumes an id whose transcript it cannot see and the
+    CLI exits 1 before the first turn. That must not kill the thread: jean
+    reconnects without `resume` and carries on."""
+    FakeSdkClient.instances.clear()
+    store = MemoryStore()
+    chat = FakeChat()
+    routing = RoutingContext()
+    await store.upsert_session("C1", "111.0", sdk_session_id="gone-with-the-pod")
+
+    calls: list[dict] = []
+
+    class ResumeRejectingClient(FakeSdkClient):
+        async def __aenter__(self):
+            if self.options["resume"] is not None:
+                # what claude_agent_sdk raises when `claude --resume <id>`
+                # prints "No conversation found with session ID" and exits 1
+                raise ProcessError("Command failed with exit code 1", exit_code=1)
+            return await super().__aenter__()
+
+    def factory(*, options):
+        calls.append({"options": options})
+        return ResumeRejectingClient(options=options)
+
+    session = JeanSession(
+        "C1",
+        "111.0",
+        store=store,
+        chat=chat,
+        routing=routing,
+        options_factory=lambda resume: {"resume": resume},
+        client_factory=factory,
+    )
+
+    await session.run_turn("hello")
+
+    assert [c["options"]["resume"] for c in calls] == ["gone-with-the-pod", None]
+    assert FakeSdkClient.instances[-1].queried == ["hello"]
+    # the fresh turn's ResultMessage replaces the unusable id in the store
+    row = await store.get_session("C1", "111.0")
+    assert row.sdk_session_id == "sdk-session-abc"
+    # the lost context is announced, not silently swallowed
+    assert len(chat.replies) == 1
+    assert "fresh" in chat.replies[0][2].lower()
+
+
+async def test_connect_failure_unrelated_to_resume_propagates():
+    """A startup failure that is NOT about the resume id (a bad --plugin-dir,
+    bad auth) also exits 1. Reconnecting without `resume` fails identically, so
+    jean must surface the error rather than pretend the thread lost its memory
+    and destroy the stored session id."""
+    FakeSdkClient.instances.clear()
+    store = MemoryStore()
+    chat = FakeChat()
+    routing = RoutingContext()
+    await store.upsert_session("C1", "111.0", sdk_session_id="perfectly-good-id")
+
+    calls: list[dict] = []
+
+    class AlwaysFailingClient(FakeSdkClient):
+        async def __aenter__(self):
+            raise ProcessError("Command failed with exit code 1", exit_code=1)
+
+    def factory(*, options):
+        calls.append({"options": options})
+        return AlwaysFailingClient(options=options)
+
+    session = JeanSession(
+        "C1",
+        "111.0",
+        store=store,
+        chat=chat,
+        routing=routing,
+        options_factory=lambda resume: {"resume": resume},
+        client_factory=factory,
+    )
+
+    try:
+        await session.run_turn("hello")
+    except ProcessError:
+        pass
+    else:
+        raise AssertionError("expected the failing connect to raise")
+
+    assert session._client is None
+    row = await store.get_session("C1", "111.0")
+    assert row.sdk_session_id == "perfectly-good-id"  # untouched
+    assert chat.replies == []  # no bogus "I lost my memory" note

@@ -39,9 +39,16 @@ never depends on a message reaching the same worker twice.
 - **Shared state in Postgres** (`asyncpg` pool): sessions (thread ↔ `sdk_session_id`,
   permission_mode, engagement), and approvals. No durable state in process memory; the
   in-process session map is only a best-effort per-worker cache.
-- **Sessions are resumable:** any worker handles any message for a thread by creating a
-  `ClaudeSDKClient` with `resume=<stored sdk_session_id>`. A worker may drop a client after
-  idle; the next message (on any worker) resumes from Postgres.
+- **Sessions are resumable, but only best-effort:** any worker handles any message for a
+  thread by creating a `ClaudeSDKClient` with `resume=<stored sdk_session_id>`. A worker may
+  drop a client after idle; the next message (on any worker) resumes from Postgres.
+  Postgres holds the session *id*, though — the CLI holds the *transcript* it names, on
+  local disk. A restarted pod or a second replica resumes an id it cannot see, and the CLI
+  exits 1 at startup. So `JeanSession` falls back to a fresh session (no `resume`) when a
+  resume fails, and only when a resume fails: a startup failure that is not about the resume
+  id (bad `--plugin-dir`, bad auth) exits 1 identically, so the two are told apart by
+  outcome — if connecting *without* `resume` also fails, it was never the resume; propagate
+  and leave the stored id alone. Never distinguish them by parsing the CLI's stderr.
 - **Per-thread serialization across workers** via the `ThreadLock` port. The Postgres adapter
   uses `pg_advisory_xact_lock(hashtext(channel||':'||thread))` so two messages for one thread
   never run concurrently, even on different workers. Single-process fallback = `asyncio.Lock`.

@@ -23,6 +23,14 @@ logger = logging.getLogger(__name__)
 
 PROTOCOL_VERSION = "2024-11-05"
 
+# One JSON-RPC frame is one line, and a `tools/list` reply carries every tool's
+# full input schema: mcp-grafana's runs to well over asyncio's default 64 KiB
+# stream limit, at which readline() raises instead of returning the line. Left at
+# the default, the probe reported a healthy server as down -- a lying probe is
+# worse than none. 16 MiB is far past any plausible tool list, and is only ever a
+# buffer ceiling, not an allocation.
+STREAM_LIMIT = 16 * 1024 * 1024
+
 _ENV_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 
@@ -67,6 +75,7 @@ async def spawn_stdio_server(config: dict[str, Any]) -> McpProcess:
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env=env,
+        limit=STREAM_LIMIT,
     )
 
 

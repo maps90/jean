@@ -3,8 +3,28 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import sys
 
-from jean.plugins.mcp_probe import preflight, probe_server
+from jean.plugins.mcp_probe import preflight, probe_server, spawn_stdio_server
+
+# A real stdio MCP server, in one process: it answers the handshake with a tools
+# list far bigger than asyncio's default 64 KiB stream limit -- which is exactly
+# what mcp-grafana does, and what made the probe report a healthy server as down.
+_BIG_SERVER = """
+import json, sys
+for line in sys.stdin:
+    msg = json.loads(line)
+    if msg.get("method") == "initialize":
+        result = {"protocolVersion": "2024-11-05", "serverInfo": {"name": "big"}}
+    elif msg.get("method") == "tools/list":
+        result = {"tools": [
+            {"name": f"tool_{i}", "description": "x" * 900} for i in range(200)
+        ]}
+    else:
+        continue
+    sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": result}) + "\\n")
+    sys.stdout.flush()
+"""
 
 
 class _Stdin:
@@ -74,6 +94,23 @@ class FakeProc:
 
     async def wait(self) -> int:
         return 0
+
+
+async def test_a_server_with_a_large_tool_list_is_not_reported_as_down():
+    """Seen in production against mcp-grafana: its tools/list reply is one line
+    of well over 64 KiB, and asyncio's default stream limit made readline() blow
+    up with "Separator is found, but chunk is longer than limit" -- so a server
+    that was perfectly healthy got logged as failed. A probe that lies about a
+    working server is worse than no probe."""
+    result = await probe_server(
+        "big",
+        {"command": sys.executable, "args": ["-c", _BIG_SERVER]},
+        spawn=spawn_stdio_server,
+        timeout=30,
+    )
+
+    assert result.connected, result.error
+    assert result.tool_count == 200
 
 
 async def test_a_healthy_server_reports_the_tools_it_serves():

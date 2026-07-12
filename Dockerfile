@@ -23,8 +23,13 @@ FROM python:3.11-slim
 #          (GitMarketplaceResolver clones those verbatim over SSH). Without it
 #          git dies with `cannot run ssh: No such file or directory`.
 #  - node/npm: oka-skills plugins bring `npx`-based MCP servers (e.g.
-#          mcp-server-kubernetes, @elastic/mcp-server-elasticsearch) that the
+#          kubernetes-mcp-server, @elastic/mcp-server-elasticsearch) that the
 #          agent SDK spawns on demand.
+#
+# `uv` (installed below) is a RUNTIME dependency too, not just the build tool
+# that runs `uv sync`: it ships `uvx`, and the grafana plugin's MCP server is
+# spawned as `uvx mcp-grafana`. Dropping uv from the final image -- e.g. when
+# making this multi-stage -- would take grafana's tools down with it.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl git openssh-client nodejs npm \
     && rm -rf /var/lib/apt/lists/*

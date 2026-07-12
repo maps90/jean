@@ -14,7 +14,7 @@ from jean.approval.gate import ApprovalGate
 from jean.config import Settings
 from jean.db.postgres import PostgresStore
 from jean.gateway.app import Gateway, register
-from jean.health import make_health_app
+from jean.health import ErrorOnlyAccessLogger, make_health_app
 from jean.maintenance.cleanup import CleanupScheduler
 from jean.persona.extract import load_soul_data
 from jean.persona.identity import load_identity
@@ -117,7 +117,9 @@ async def run() -> None:
     register(app, gw)
 
     health_app = make_health_app(ready_check=store.ping)
-    runner = web.AppRunner(health_app)
+    # Probe traffic is constant and uninteresting; log only 4xx/5xx (see
+    # ErrorOnlyAccessLogger) so it does not bury everything else.
+    runner = web.AppRunner(health_app, access_log_class=ErrorOnlyAccessLogger)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", settings.health_port)
     await site.start()

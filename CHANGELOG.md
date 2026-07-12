@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.4.1](https://github.com/maps90/jean/compare/v0.4.0...v0.4.1) (2026-07-12)
+
+
+### Bug Fixes
+
+* **db:** configurable asyncpg pool size + openssh-client in image ([#19](https://github.com/maps90/jean/issues/19)) ([a722475](https://github.com/maps90/jean/commit/a722475f46988b2b88c0d25d5bfb7ddc3a11ddb6))
+* **session:** survive a resume whose CLI transcript is gone ([#21](https://github.com/maps90/jean/issues/21)) ([5ce7e4c](https://github.com/maps90/jean/commit/5ce7e4c1adce5f23c90ece23512e47f03933d844))
+
 ## [0.4.0](https://github.com/maps90/jean/compare/v0.3.0...v0.4.0) (2026-07-12)
 
 

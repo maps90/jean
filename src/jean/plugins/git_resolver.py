@@ -29,7 +29,16 @@ def _scrub(text: str) -> str:
     return _TOKEN_URL.sub("x-access-token:***@", text)
 
 
+def _is_ssh(marketplace: str) -> bool:
+    return marketplace.startswith("git@") or marketplace.startswith("ssh://")
+
+
 def _auth_url(marketplace: str, token: str | None) -> str:
+    # SSH transport is chosen by the URL scheme and used verbatim: git resolves
+    # auth from the ambient SSH agent / deploy key, so no token is embedded (and
+    # the tokenless persisted remote is identical -- the set-url step is a no-op).
+    if _is_ssh(marketplace):
+        return marketplace
     m = _GH.match(marketplace)
     path = m.group("path") if m else marketplace
     if token:
@@ -62,8 +71,9 @@ async def _default_git_run(args: list[str], cwd: Path) -> None:
 
 
 class GitMarketplaceResolver:
-    """Clones marketplace repos over HTTPS (token auth) and returns local plugin
-    paths for the SDK's local-plugin loading. Fails loudly on any resolve error."""
+    """Clones marketplace repos -- HTTPS (token auth) or SSH (ambient key),
+    chosen by the marketplace URL scheme -- and returns local plugin paths for
+    the SDK's local-plugin loading. Fails loudly on any resolve error."""
 
     def __init__(
         self, *, token: str | None, cache_dir: Path, runner: GitRunner | None = None

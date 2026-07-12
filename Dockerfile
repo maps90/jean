@@ -44,9 +44,26 @@ RUN uv sync --no-dev
 
 ENV PATH="/app/.venv/bin:$PATH"
 
+# --- Run as non-root ---------------------------------------------------------
+# Not just hardening: the CLI *refuses to start* as root when jean runs with
+# permission_mode=bypassPermissions (the SDK passes --dangerously-skip-permissions,
+# and the CLI rejects that under root/sudo "for security reasons", exit 1). So a
+# root container breaks every turn, not merely a risky one.
+#
+# HOME must be a writable dir owned by this uid: the CLI writes its config and
+# per-conversation transcripts under $HOME/.claude. Deployments that mount a
+# volume (k8s emptyDir) should point HOME at it and set fsGroup=10001; the
+# in-image /home/jean is the standalone-docker fallback.
+RUN useradd --create-home --uid 10001 --user-group jean
+USER 10001
+ENV HOME=/home/jean
+
 # Informational only -- see docker-compose.yaml, which intentionally does not
 # map this to a host port so `docker compose up --scale jean=N` works without
 # port collisions between replicas.
 EXPOSE 8080
 
-CMD ["uv", "run", "jean"]
+# Exec the console script from the venv on PATH rather than `uv run`, which
+# re-resolves the project at startup and wants to write to /app -- root-owned
+# from the build, and no longer writable now that we drop to uid 10001.
+CMD ["jean"]

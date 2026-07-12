@@ -2,8 +2,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
-BASELINE_PROMPT = """\
-You are jean, an AI teammate embedded in Slack. One Slack thread is one
+DEFAULT_AGENT_NAME = "jean"
+
+# `{name}` is the persona's name (IDENTITY.md `Name:`), not the project's -- the
+# baseline is prepended to the persona text, so a hardcoded name here would
+# out-rank the one the persona declares and the agent would introduce itself
+# wrong. Everything else in this template is literal; keep it `.format()`-safe.
+BASELINE_TEMPLATE = """\
+You are {name}, an AI teammate embedded in Slack. One Slack thread is one
 persistent conversation with you; you keep context across turns in the same
 thread via session resume.
 
@@ -38,6 +44,11 @@ def load_identity(path: str | Path) -> str:
     return p.read_text()
 
 
-def compose_system_prompt(persona: str) -> str:
-    """baseline (output/approval/engagement discipline) + the raw persona text."""
-    return f"{BASELINE_PROMPT}\n\n---\n\n{persona}"
+def compose_system_prompt(persona: str, *, name: str = DEFAULT_AGENT_NAME) -> str:
+    """baseline (output/approval/engagement discipline) + the raw persona text.
+
+    `name` comes from the persona doc (SoulData.identity.name); it is who the
+    agent is told it is. It is a display name, never a security input -- no gate
+    reads it -- so an LLM-extracted value is fine here.
+    """
+    return f"{BASELINE_TEMPLATE.format(name=name)}\n\n---\n\n{persona}"

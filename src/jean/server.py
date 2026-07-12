@@ -86,6 +86,7 @@ async def run() -> None:
     def options_factory(resume: str | None) -> ClaudeAgentOptions:
         return build_agent_options(
             persona_text=persona_text,
+            agent_name=soul_provider().identity.name,
             slack_server=server_mcp,
             slack_tool_names=tool_names,
             extra_mcp=extra_mcp,

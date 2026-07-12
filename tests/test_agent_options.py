@@ -45,6 +45,21 @@ def test_no_plugins_no_extra_mcp(monkeypatch):
     assert opts.resume == "sess-123"
 
 
+def test_agent_name_reaches_the_system_prompt(monkeypatch):
+    opts = build_agent_options(
+        persona_text="Name: Anya",
+        agent_name="Anya",
+        slack_server={"_": "slack"},
+        slack_tool_names=["mcp__jean_slack__reply"],
+        extra_mcp={},
+        plugins=[],
+        settings=_settings(monkeypatch),
+        resume=None,
+    )
+    assert "You are Anya," in opts.system_prompt
+    assert "You are jean," not in opts.system_prompt
+
+
 def test_cli_stderr_is_routed_to_the_logger(monkeypatch, caplog):
     """Without a stderr callback the SDK leaves the CLI child's stderr
     unpiped, and a startup failure surfaces only as ProcessError(stderr="Check

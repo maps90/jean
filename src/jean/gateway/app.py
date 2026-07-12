@@ -18,12 +18,14 @@ ALLOWED_PERMISSION_MODES = {
     "auto",
 }
 
-HELP_TEXT = (
-    "jean commands:\n"
-    f"/mode <mode> - set this thread's permission mode "
-    f"({', '.join(sorted(ALLOWED_PERMISSION_MODES))})\n"
-    "/help - show this message"
-)
+
+def help_text(agent_name: str) -> str:
+    return (
+        f"{agent_name} commands:\n"
+        f"/mode <mode> - set this thread's permission mode "
+        f"({', '.join(sorted(ALLOWED_PERMISSION_MODES))})\n"
+        "/help - show this message"
+    )
 
 
 class _Manager(Protocol):
@@ -105,7 +107,7 @@ class Gateway:
             await self._store.upsert_session(channel, thread_ts, permission_mode=mode, touch=False)
             return f"permission mode set to {mode!r} for this thread"
         if command == "/help":
-            return HELP_TEXT
+            return help_text(self._soul_provider().identity.name)
         return f"unknown command {command!r}"
 
 

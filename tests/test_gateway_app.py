@@ -147,3 +147,11 @@ async def test_help_command_returns_help_text():
     result = await gw.on_command("/help", "C1", "111.0", "U11111", "")
 
     assert "/mode" in result
+
+
+async def test_help_command_uses_the_persona_name():
+    gw, _store, _manager, _gate = _gateway(soul=_soul(identity=Identity(name="Anya")))
+
+    result = await gw.on_command("/help", "C1", "111.0", "U11111", "")
+
+    assert result.startswith("Anya commands:")

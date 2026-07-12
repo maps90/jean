@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from claude_agent_sdk import ClaudeAgentOptions, PermissionResultAllow
@@ -7,6 +8,23 @@ from claude_agent_sdk import ClaudeAgentOptions, PermissionResultAllow
 from jean.config import Settings
 from jean.persona.identity import compose_system_prompt
 from jean.ports import ResolvedPlugin
+
+logger = logging.getLogger(__name__)
+
+
+def _log_cli_stderr(line: str) -> None:
+    """Surface the claude CLI child's stderr in jean's logs.
+
+    The SDK pipes that stderr *only* when this callback is set; otherwise the
+    child inherits ours and a startup failure arrives as a bare ProcessError
+    whose `stderr` is the literal string "Check stderr output for details"
+    (subprocess_cli.py) -- i.e. the one thing that says why the CLI exited is
+    the thing you cannot see. Everything the CLI writes here is a diagnostic,
+    so log it as a warning rather than dropping it.
+    """
+    line = line.rstrip()
+    if line:
+        logger.warning("claude-cli: %s", line)
 
 
 async def _allow_all_tools(
@@ -38,6 +56,7 @@ def build_agent_options(
         resume=resume,
         model=settings.model,
         cwd=str(settings.home / "workspaces"),
+        stderr=_log_cli_stderr,
     )
 
 

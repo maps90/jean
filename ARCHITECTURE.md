@@ -95,6 +95,19 @@ Slack (Socket Mode)  ── load-balances events across all connected workers �
 6. After the turn, the (possibly new) session id is persisted. Later the idle
    sweep may drop the client; the next message resumes from Postgres.
 
+**Resume is best-effort, and Postgres alone cannot make it otherwise.** Postgres
+stores the session *id*; the `claude` CLI stores the *transcript* that id names on
+local disk (`$HOME/.claude/projects/<cwd>/<id>.jsonl`). A restarted pod — or any
+other replica — therefore resumes an id whose transcript it cannot see, and the CLI
+exits 1 during startup ("No conversation found with session ID"). `JeanSession`
+handles that by reconnecting without `resume`: the thread keeps working and loses
+the agent's memory of its earlier turns, and says so in-thread. Threads survive a
+restart; their history does not.
+
+To make resume durable, mirror transcripts into Postgres via the SDK's
+`ClaudeAgentOptions.session_store` hook (`append`/`load`; `load` materializes the
+transcript before subprocess spawn, so it needs no shared filesystem). Not built.
+
 ## Persistence
 
 Postgres holds two tables (created idempotently at boot):

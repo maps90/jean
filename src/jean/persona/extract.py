@@ -21,6 +21,7 @@ _SYSTEM_PROMPT = (
 
 _MENTION_RE = re.compile(r"<@([UW][A-Z0-9]+)(?:\|[^>]+)?>")
 _CHANNEL_RE = re.compile(r"<#([CGD][A-Z0-9]+)(?:\|[^>]*)?>")
+_NAME_RE = re.compile(r"^\s*[-*]?\s*Name:\s*(\S.*?)\s*$", re.IGNORECASE | re.MULTILINE)
 
 
 def assert_ids_grounded(soul: SoulData, persona: str) -> None:
@@ -61,8 +62,11 @@ def regex_fallback(persona: str) -> SoulData:
             continue
         approvers.append(ApproverEntry(user_id=uid, scope=scope))
 
+    name_match = _NAME_RE.search(persona)
+    identity = Identity(name=name_match.group(1)) if name_match else Identity()
+
     return SoulData(
-        identity=Identity(),
+        identity=identity,
         manager=manager,
         allowed_channels=list(dict.fromkeys(channels)),
         approvers=approvers,

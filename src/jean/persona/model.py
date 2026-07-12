@@ -77,17 +77,19 @@ class SoulData:
 
 EXTRACTION_PROMPT = """\
 You are extracting a structured "soul" from a persona document (IDENTITY.md)
-for a Slack-native AI teammate called jean. Read the raw text below and
-return ONLY a JSON object (no prose, no markdown fences) with this shape:
+for a Slack-native AI teammate. The document names the teammate; do not assume
+a name. Read the raw text below and return ONLY a JSON object (no prose, no
+markdown fences) with this shape:
 
 {
-  "identity": {"name": "<jean's name>", "role": "<one-line role>"},
+  "identity": {"name": "<the teammate's name, exactly as the document gives it>",
+               "role": "<one-line role>"},
   "manager": {"user_id": "<Slack user id, e.g. U0123ABCD>", "name": "<display name>"},
   "allowed_channels": ["<Slack channel id>", ...],
   "dm_allowed_users": ["<Slack user id>", ...],
   "blocked_users": ["<Slack user id>", ...],
   "approvers": [{"user_id": "<Slack user id>", "scope": "<keywords>", "catchall": false}, ...],
-  "mandate": "<what jean is for, one paragraph>",
+  "mandate": "<what the teammate is for, one paragraph>",
   "values": ["<value>", ...],
   "approval_timeout_seconds": 0
 }

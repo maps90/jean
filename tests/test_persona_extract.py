@@ -60,6 +60,16 @@ def test_regex_fallback_on_empty_persona_has_no_manager():
     assert soul.approvers == []
 
 
+def test_regex_fallback_reads_the_persona_name():
+    """A degraded extraction must not silently rename the agent back to jean."""
+    soul = regex_fallback("# Persona\n\n## Identity\n- Name: Anya\n- Role: SRE\n")
+    assert soul.identity.name == "Anya"
+
+
+def test_regex_fallback_without_a_name_keeps_the_default():
+    assert regex_fallback(PERSONA).identity.name == "jean"
+
+
 async def test_load_soul_data_happy_path_extracts_and_caches(tmp_path, monkeypatch):
     settings = _settings(tmp_path, monkeypatch)
     calls = []

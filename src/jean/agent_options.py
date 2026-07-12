@@ -6,7 +6,7 @@ from typing import Any
 from claude_agent_sdk import ClaudeAgentOptions, PermissionResultAllow
 
 from jean.config import Settings
-from jean.persona.identity import compose_system_prompt
+from jean.persona.identity import DEFAULT_AGENT_NAME, compose_system_prompt
 from jean.ports import ResolvedPlugin
 
 logger = logging.getLogger(__name__)
@@ -43,9 +43,10 @@ def build_agent_options(
     plugins: list[ResolvedPlugin],
     settings: Settings,
     resume: str | None,
+    agent_name: str = DEFAULT_AGENT_NAME,
 ) -> ClaudeAgentOptions:
     return ClaudeAgentOptions(
-        system_prompt=compose_system_prompt(persona_text),
+        system_prompt=compose_system_prompt(persona_text, name=agent_name),
         mcp_servers={"jean_slack": slack_server, **extra_mcp},
         allowed_tools=[*slack_tool_names, "mcp__*"],
         plugins=[{"type": "local", "path": p.path} for p in plugins],

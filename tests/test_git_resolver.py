@@ -57,10 +57,25 @@ async def test_token_never_in_cache_path(tmp_path):
 async def test_clone_url_uses_https_token(tmp_path):
     runner, calls = _make_fake_runner(["grafana"])
     r = GitMarketplaceResolver(token="ghp_secret", cache_dir=tmp_path, runner=runner)
-    await r.resolve([PluginRef("git@github.com:OkadocTech/oka-skills.git", "grafana", "main")])
+    await r.resolve([PluginRef("https://github.com/OkadocTech/oka-skills.git", "grafana", "main")])
     clone = next(c for c in calls if c[0] == "clone")
     url = next(a for a in clone if urlparse(a).hostname == "github.com")
     assert url == "https://x-access-token:ghp_secret@github.com/OkadocTech/oka-skills.git"
+
+
+async def test_ssh_marketplace_clones_over_ssh(tmp_path):
+    # An `git@github.com:...` (or `ssh://`) marketplace must clone over SSH
+    # verbatim -- transport is chosen by the URL scheme, not silently rewritten
+    # to HTTPS. The HTTPS access token must never be embedded in an SSH clone.
+    runner, calls = _make_fake_runner(["grafana"])
+    r = GitMarketplaceResolver(token="ghp_secret", cache_dir=tmp_path, runner=runner)
+    await r.resolve([PluginRef("git@github.com:OkadocTech/oka-skills.git", "grafana", "main")])
+    clone = next(c for c in calls if c[0] == "clone")
+    assert clone[1] == "git@github.com:OkadocTech/oka-skills.git"
+    assert not any("x-access-token" in a for a in clone)
+    # The persisted remote stays the same SSH url (no token to strip).
+    seturl = next(c for c in calls if "set-url" in c)
+    assert seturl[-1] == "git@github.com:OkadocTech/oka-skills.git"
 
 
 def test_scrub_removes_token():

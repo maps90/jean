@@ -23,6 +23,13 @@ class Settings(BaseSettings):
     claude_code_oauth_token: str | None = None
 
     database_url: str = "postgresql://jean:jean@localhost:5432/jean"
+    # Per-worker asyncpg pool bounds. jean typically shares a managed Postgres
+    # with other apps, and each worker also opens a separate LISTEN connection
+    # on top of the pool -- so N workers cost N*(db_pool_max + 1) slots against
+    # the server's `max_connections`. Keep the default modest; raise it only on
+    # a server with headroom to spare.
+    db_pool_min: int = 1
+    db_pool_max: int = 5
     home: Path = Path.home() / ".jean"
     idle_minutes: int = 15
     approval_ttl: int = 1800

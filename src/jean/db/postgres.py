@@ -40,8 +40,11 @@ class PostgresStore:
         self._dsn = dsn
 
     @classmethod
-    async def connect(cls, dsn: str) -> PostgresStore:
-        pool = await asyncpg.create_pool(dsn, min_size=1, max_size=10)
+    async def connect(cls, dsn: str, *, min_size: int = 1, max_size: int = 5) -> PostgresStore:
+        """Open the pool. Sizes come from Settings (`JEAN_DB_POOL_MIN/MAX`) so a
+        deployment sharing a small managed Postgres can shrink its footprint
+        without a rebuild -- see the note on Settings.db_pool_max."""
+        pool = await asyncpg.create_pool(dsn, min_size=min_size, max_size=max_size)
         async with pool.acquire() as c:
             await c.execute(_SCHEMA)
         return cls(pool, dsn)

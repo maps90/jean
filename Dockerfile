@@ -19,11 +19,14 @@ FROM python:3.11-slim
 #  - curl: general fetch utility (health checks, ad-hoc debugging).
 #  - git:  GitMarketplaceResolver (jean.plugins) clones the marketplace repos
 #          named in jean.json at boot.
+#  - openssh-client: git shells out to `ssh` for a git@/ssh:// marketplace url
+#          (GitMarketplaceResolver clones those verbatim over SSH). Without it
+#          git dies with `cannot run ssh: No such file or directory`.
 #  - node/npm: oka-skills plugins bring `npx`-based MCP servers (e.g.
 #          mcp-server-kubernetes, @elastic/mcp-server-elasticsearch) that the
 #          agent SDK spawns on demand.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl git nodejs npm \
+    && apt-get install -y --no-install-recommends ca-certificates curl git openssh-client nodejs npm \
     && rm -rf /var/lib/apt/lists/*
 
 RUN pip install --no-cache-dir uv

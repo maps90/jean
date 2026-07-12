@@ -86,3 +86,20 @@ def test_external_paths_override(clean_env):
     assert settings.plugins_path == Path("/etc/jean/jean.json")
     assert settings.mcp_config_path == Path("/etc/jean/mcp.json")
     assert settings.marketplace_token == "ghp_abc"
+
+
+def test_db_pool_defaults_are_modest(clean_env):
+    # jean shares a small managed Postgres with other apps; a worker must not
+    # hog connection slots. Keep the default pool small enough that N workers
+    # fit inside a low `max_connections` budget.
+    settings = Settings.load()
+    assert settings.db_pool_min == 1
+    assert settings.db_pool_max == 5
+
+
+def test_db_pool_size_overridable(clean_env):
+    clean_env.setenv("JEAN_DB_POOL_MIN", "2")
+    clean_env.setenv("JEAN_DB_POOL_MAX", "3")
+    settings = Settings.load()
+    assert settings.db_pool_min == 2
+    assert settings.db_pool_max == 3

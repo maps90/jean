@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 
 from jean.agent_options import build_agent_options
@@ -28,6 +29,32 @@ def test_merges_slack_and_external_mcp(monkeypatch):
     assert opts.plugins == [{"type": "local", "path": "/opt/mp/plugins/grafana"}]
     assert opts.skills == "all"
     assert opts.strict_mcp_config is False
+
+
+def test_plugin_tools_are_allowed_by_server_not_by_a_bare_wildcard(monkeypatch, tmp_path):
+    """`mcp__*` is rejected by the CLI ("Wildcard tool name mcp__* is not
+    supported in allow rules") and the rule is dropped, which left every plugin
+    tool unreachable in production. The allow pattern must name its server."""
+    plugin = tmp_path / "kubectl"
+    plugin.mkdir()
+    (plugin / ".mcp.json").write_text(
+        json.dumps({"mcpServers": {"kubernetes": {"command": "npx"}}})
+    )
+
+    opts = build_agent_options(
+        persona_text="I am jean.",
+        slack_server={"_": "slack"},
+        slack_tool_names=["mcp__jean_slack__reply"],
+        extra_mcp={"grafana": {"command": "npx"}},
+        plugins=[ResolvedPlugin("kubectl", str(plugin))],
+        settings=_settings(monkeypatch),
+        resume=None,
+    )
+
+    assert "mcp__*" not in opts.allowed_tools
+    assert "mcp__plugin_kubectl_kubernetes__*" in opts.allowed_tools
+    assert "mcp__grafana__*" in opts.allowed_tools
+    assert "mcp__jean_slack__reply" in opts.allowed_tools
 
 
 def test_no_plugins_no_extra_mcp(monkeypatch):

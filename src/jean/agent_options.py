@@ -7,6 +7,7 @@ from claude_agent_sdk import ClaudeAgentOptions, PermissionResultAllow
 
 from jean.config import Settings
 from jean.persona.identity import DEFAULT_AGENT_NAME, compose_system_prompt
+from jean.plugins.mcp_config import extra_mcp_tool_patterns, plugin_tool_patterns
 from jean.ports import ResolvedPlugin
 
 logger = logging.getLogger(__name__)
@@ -48,7 +49,11 @@ def build_agent_options(
     return ClaudeAgentOptions(
         system_prompt=compose_system_prompt(persona_text, name=agent_name),
         mcp_servers={"jean_slack": slack_server, **extra_mcp},
-        allowed_tools=[*slack_tool_names, "mcp__*"],
+        allowed_tools=[
+            *slack_tool_names,
+            *extra_mcp_tool_patterns(extra_mcp),
+            *plugin_tool_patterns(plugins),
+        ],
         plugins=[{"type": "local", "path": p.path} for p in plugins],
         skills="all",
         strict_mcp_config=False,
@@ -59,10 +64,3 @@ def build_agent_options(
         cwd=str(settings.home / "workspaces"),
         stderr=_log_cli_stderr,
     )
-
-
-# Note (spike): `allowed_tools` includes `"mcp__*"` so plugin/external MCP
-# tools are reachable. Before merging, run jean against one real plugin (e.g.
-# `grafana`) and confirm its `mcp__grafana__*` tools are callable; if the CLI
-# requires exact names instead of the wildcard, replace `"mcp__*"` with the
-# per-server patterns discovered at resolve time.

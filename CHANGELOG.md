@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/maps90/jean/compare/v0.3.0...v0.4.0) (2026-07-12)
+
+
+### Features
+
+* **plugins:** resolve SSH marketplace URLs over SSH transport ([#15](https://github.com/maps90/jean/issues/15)) ([9587b82](https://github.com/maps90/jean/commit/9587b82c40f05b851e7c5b10604a2b08bcf1bc11))
+
 ## [0.3.0](https://github.com/maps90/jean/compare/v0.2.0...v0.3.0) (2026-07-11)
 
 

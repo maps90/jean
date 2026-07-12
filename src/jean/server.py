@@ -21,6 +21,8 @@ from jean.persona.identity import load_identity
 from jean.persona.model import SoulData
 from jean.plugins.git_resolver import GitMarketplaceResolver
 from jean.plugins.manifest import load_mcp_config, load_plugin_manifest
+from jean.plugins.mcp_config import probeable_servers
+from jean.plugins.mcp_probe import preflight
 from jean.session.manager import SessionManager
 from jean.session.session import JeanSession, RoutingContext
 from jean.slack.client import SlackSurface
@@ -125,6 +127,18 @@ async def run() -> None:
     site = web.TCPSite(runner, "0.0.0.0", settings.health_port)
     await site.start()
     logger.info("jean health server listening on :%d", settings.health_port)
+
+    # Load every MCP server once, here: the CLI spawns them per session and never
+    # reports back whether they came up (its init message calls every plugin
+    # server "pending" and carries none of their tools), so one that fails to
+    # start leaves a thread silently tool-less for its whole life -- the CLI does
+    # not retry inside a session. Probing does the same `npx` resolution the CLI
+    # will do, retries it, and says in the log what loaded and what did not.
+    #
+    # Placement is deliberate: *after* the health server binds, so a slow cold
+    # `npx` cannot stall the liveness probe into killing the pod, and *before*
+    # Slack connects, so no thread starts against a server that is still coming up.
+    await preflight(probeable_servers(extra_mcp, plugins))
 
     tasks = [
         AsyncSocketModeHandler(app, settings.slack_app_token).start_async(),

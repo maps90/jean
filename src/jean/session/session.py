@@ -49,17 +49,58 @@ class JeanSession:
         self._client_factory = client_factory
         self._client: Any | None = None
 
+    async def _open(self, resume: str | None) -> Any:
+        options = self._options_factory(resume)
+        client = self._client_factory(options=options)
+        try:
+            await client.__aenter__()
+        except BaseException:
+            with contextlib.suppress(Exception):
+                await client.__aexit__(None, None, None)
+            raise
+        return client
+
+    async def _connect(self) -> Any:
+        """Connect a client, resuming the stored sdk_session_id when there is one.
+
+        The stored id can outlive the transcript it names: the CLI writes each
+        conversation to the *local* filesystem ($HOME/.claude/projects/<cwd>/
+        <id>.jsonl) while jean persists only the id in Postgres, so a restarted
+        pod -- or any other replica -- resumes an id it cannot see and the CLI
+        exits 1 during startup, before the turn even begins. Rather than fail
+        the user's message, reconnect without `resume`: the thread keeps
+        working, having lost the agent's memory of its earlier turns (the next
+        ResultMessage overwrites the unusable id in the store).
+
+        A startup failure that is *not* about the resume id (bad --plugin-dir,
+        bad auth) exits 1 the same way, so tell them apart by outcome rather
+        than by parsing the CLI's stderr: if connecting without `resume` fails
+        too, it was never the resume -- propagate, and leave the stored id
+        alone.
+        """
+        row = await self._store.get_session(self._channel, self._thread_ts)
+        resume = row.sdk_session_id if row else None
+        if resume is None:
+            return await self._open(None)
+        try:
+            return await self._open(resume)
+        except Exception:
+            client = await self._open(None)
+        await self._chat.reply(
+            self._channel,
+            self._thread_ts,
+            "_(I couldn't pick up where we left off in this thread — "
+            "my memory of the earlier turns is gone. Starting fresh.)_",
+        )
+        return client
+
     async def run_turn(self, text: str) -> None:
         self._routing.channel = self._channel
         self._routing.thread_ts = self._thread_ts
         await self._chat.set_status(self._channel, self._thread_ts, "is thinking...")
         try:
             if self._client is None:
-                row = await self._store.get_session(self._channel, self._thread_ts)
-                resume = row.sdk_session_id if row else None
-                options = self._options_factory(resume)
-                self._client = self._client_factory(options=options)
-                await self._client.__aenter__()
+                self._client = await self._connect()
 
             await self._client.query(text)
             async for msg in self._client.receive_response():

@@ -75,7 +75,7 @@ def test_http_servers_are_left_for_the_cli_to_connect_to():
     extra = {"remote": {"type": "http", "url": "https://x"}, "local": {"command": "npx"}}
 
     assert stdio_servers(extra, []) == {"local": {"command": "npx"}}
-    assert remote_servers(extra) == {"remote": {"type": "http", "url": "https://x"}}
+    assert remote_servers(extra, []) == {"remote": {"type": "http", "url": "https://x"}}
 
 
 def test_taking_over_a_plugin_stops_the_cli_spawning_its_servers(tmp_path):
@@ -101,6 +101,72 @@ def test_taking_over_is_idempotent(tmp_path):
     assert list(stdio_servers({}, [p])) == ["plugin_kubectl_kubernetes"]
 
 
+def test_a_plugins_http_server_is_registered_not_dropped(tmp_path, monkeypatch):
+    """The bug this file exists to close. A plugin that declares an http MCP server
+    used to have it registered by NOBODY: plugin_mcp_servers() filtered it out (no
+    `command`), remote_servers() never looked at plugins, and take_over_plugin_mcp()
+    then renamed the file away so the CLI could not reach it either. The agent was
+    left to curl the endpoint through Bash -- and every Bash call is an approval
+    click. Eleven of them, in one thread, to answer one question."""
+    monkeypatch.setenv("GW_TOKEN", "sekrit")
+    p = _plugin(
+        tmp_path,
+        "gateway",
+        {
+            "gw": {
+                "type": "http",
+                "url": "https://gw.internal/mcp",
+                "headers": {"Authorization": "Bearer ${GW_TOKEN}"},
+            }
+        },
+    )
+
+    assert remote_servers({}, [p]) == {
+        "gw": {
+            "type": "http",
+            "url": "https://gw.internal/mcp",
+            "headers": {"Authorization": "Bearer sekrit"},
+        }
+    }
+
+
+def test_a_plugins_http_server_is_keyed_by_the_name_it_declares(tmp_path):
+    """The key is the agent-facing tool prefix (`mcp__<key>__<tool>`), so it is the
+    plugin's declared name, NOT the `plugin_<plugin>_<server>` form used for stdio.
+
+    That form exists to reproduce ids the CLI already minted for servers it used to
+    spawn. No such ids exist here -- these tools have never worked -- and the prefix
+    budget is real: a gateway proxies tools that are already namespaced, so
+    `mcp__plugin_portico_portico__atlassian__getAccessibleAtlassianResources` is 71
+    characters against a 64-character limit. `mcp__portico__…` fits; the long form
+    does not."""
+    p = _plugin(tmp_path, "portico", {"portico": {"type": "http", "url": "https://x/mcp"}})
+
+    assert list(remote_servers({}, [p])) == ["portico"]
+
+
+def test_a_plugins_stdio_server_still_goes_through_the_proxy(tmp_path):
+    """Regression: http changes nothing for stdio. jean still runs those itself."""
+    p = _plugin(
+        tmp_path,
+        "kubectl",
+        {"kubernetes": {"command": "npx"}, "gw": {"type": "http", "url": "https://x"}},
+    )
+
+    assert list(stdio_servers({}, [p])) == ["plugin_kubectl_kubernetes"]
+    assert list(remote_servers({}, [p])) == ["gw"]
+
+
+def test_two_plugins_claiming_the_same_server_name_fail_at_boot(tmp_path):
+    """The key is a tool prefix, so a duplicate would have one server's tools
+    silently shadow the other's. Refuse, naming both, rather than pick a winner."""
+    a = _plugin(tmp_path, "alpha", {"gw": {"type": "http", "url": "https://a"}})
+    b = _plugin(tmp_path, "beta", {"gw": {"type": "http", "url": "https://b"}})
+
+    with pytest.raises(ValueError, match="gw"):
+        remote_servers({}, [a, b])
+
+
 def test_a_remote_servers_credential_comes_from_the_environment(monkeypatch):
     """Registering an HTTP API as the MCP server it already is is what keeps it
     off the Bash/curl path -- where every single call costs a human an approval
@@ -115,7 +181,7 @@ def test_a_remote_servers_credential_comes_from_the_environment(monkeypatch):
         }
     }
 
-    assert remote_servers(extra) == {
+    assert remote_servers(extra, []) == {
         "portico": {
             "type": "http",
             "url": "https://portico.int.okadoc.net/mcp",
@@ -138,7 +204,7 @@ def test_a_remote_server_missing_its_credential_fails_at_boot(monkeypatch):
     }
 
     with pytest.raises(MissingEnvVar, match="PORTICO_ACCESS_TOKEN"):
-        remote_servers(extra)
+        remote_servers(extra, [])
 
 
 def test_a_stdio_servers_config_is_not_expanded_here(monkeypatch):
@@ -148,7 +214,7 @@ def test_a_stdio_servers_config_is_not_expanded_here(monkeypatch):
     monkeypatch.delenv("NOT_SET_ANYWHERE", raising=False)
     extra = {"local": {"command": "npx", "args": ["${NOT_SET_ANYWHERE}"]}}
 
-    assert remote_servers(extra) == {}
+    assert remote_servers(extra, []) == {}
     assert stdio_servers(extra, []) == {
         "local": {"command": "npx", "args": ["${NOT_SET_ANYWHERE}"]}
     }

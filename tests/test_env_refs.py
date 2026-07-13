@@ -80,6 +80,71 @@ def test_an_unset_var_in_a_remote_config_fails_loudly(monkeypatch):
     assert "portico" in str(exc.value)
 
 
+def test_a_default_fills_in_for_an_unset_var(monkeypatch):
+    """`${VAR:-fallback}` is the syntax the Claude CLI expands in a .mcp.json, so
+    plugin authors write it. jean must read the same dialect or it hands the CLI a
+    URL with a literal `${...}` in it."""
+    monkeypatch.delenv("PORTICO_URL", raising=False)
+
+    expanded = expand_config(
+        {"url": "${PORTICO_URL:-https://portico.int.okadoc.net}/mcp"}, server="portico"
+    )
+
+    assert expanded["url"] == "https://portico.int.okadoc.net/mcp"
+
+
+def test_a_set_var_beats_its_default(monkeypatch):
+    monkeypatch.setenv("PORTICO_URL", "https://portico.staging")
+
+    expanded = expand_config(
+        {"url": "${PORTICO_URL:-https://portico.int.okadoc.net}/mcp"}, server="portico"
+    )
+
+    assert expanded["url"] == "https://portico.staging/mcp"
+
+
+def test_a_default_means_there_is_nothing_to_fail_about(monkeypatch):
+    """Strictness is about a credential nobody supplied. A var *with* a default was
+    supplied -- by the author -- so it must not raise."""
+    monkeypatch.delenv("PORTICO_URL", raising=False)
+
+    assert expand_config({"url": "${PORTICO_URL:-https://x}"}, server="p") == {"url": "https://x"}
+
+
+def test_an_empty_default_is_still_a_default(monkeypatch):
+    """`${VAR:-}` says "empty is fine here" out loud. Distinct from a bare `${VAR}`,
+    which says nothing and must therefore raise."""
+    monkeypatch.delenv("OPTIONAL_THING", raising=False)
+
+    assert expand_config({"x": "a${OPTIONAL_THING:-}b"}, server="p") == {"x": "ab"}
+
+
+def test_lenient_expand_honours_defaults_too(monkeypatch):
+    monkeypatch.delenv("ES_URL", raising=False)
+
+    assert expand("${ES_URL:-http://localhost:9200}") == "http://localhost:9200"
+
+
+def test_a_var_exported_empty_is_treated_as_unset(monkeypatch):
+    """`PORTICO_ACCESS_TOKEN=""` is the silent-401 trap wearing a disguise: the var
+    exists, so a naive reader substitutes it and sends `Bearer `. POSIX `:-` counts
+    empty as unset and so do we -- refuse, rather than ship an empty credential."""
+    monkeypatch.setenv("PORTICO_ACCESS_TOKEN", "")
+
+    with pytest.raises(MissingEnvVar, match="unset or empty"):
+        expand_config(
+            {"headers": {"Authorization": "Bearer ${PORTICO_ACCESS_TOKEN}"}}, server="portico"
+        )
+
+
+def test_an_empty_var_falls_back_to_its_default(monkeypatch):
+    monkeypatch.setenv("PORTICO_URL", "")
+
+    assert expand_config({"url": "${PORTICO_URL:-https://fallback}"}, server="p") == {
+        "url": "https://fallback"
+    }
+
+
 def test_expansion_does_not_mutate_the_config_it_was_given(monkeypatch):
     monkeypatch.setenv("TOK", "t0k")
     config = {"headers": {"Authorization": "Bearer ${TOK}"}}

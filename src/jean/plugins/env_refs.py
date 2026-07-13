@@ -4,11 +4,18 @@ import os
 import re
 from typing import Any
 
-# `${VAR}` inside an MCP server config. The CLI expands these in a .mcp.json it
-# reads itself, so jean must too for the configs it hands over -- and jean ships
-# its servers to the CLI as an inline `--mcp-config` blob, not as a file on disk,
-# so betting a bearer token on the CLI doing it for us is not a bet worth having.
-ENV_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+# `${VAR}` and `${VAR:-default}` inside an MCP server config. The CLI expands both
+# in a .mcp.json it reads itself, so jean must speak the same dialect for the
+# configs it hands over -- and jean ships its servers to the CLI as an inline
+# `--mcp-config` blob, not as a file on disk, so betting a bearer token on the CLI
+# doing it for us is not a bet worth having.
+#
+# The `:-default` half is not a nicety: plugin authors write
+# `${PORTICO_URL:-https://portico.int.okadoc.net}` so their server works unset.
+# A reader that only understands `${VAR}` leaves that whole string untouched --
+# no substitution, and no error either, because nothing matched -- and hands the
+# CLI a URL with a literal `${...}` in it.
+ENV_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
 
 
 class MissingEnvVar(Exception):
@@ -16,13 +23,14 @@ class MissingEnvVar(Exception):
 
 
 def expand(value: str) -> str:
-    """Lenient: an unset var becomes "". Used for a *stdio* server's env block.
+    """Lenient: an unset var falls back to its `:-default`, or to "". Used for a
+    *stdio* server's env block.
 
     Survivable there because a stdio server starved of a variable dies at spawn,
     loudly, with its stderr captured (mcp_stdio.stderr_tail). A remote server has
     no such moment -- see expand_config.
     """
-    return ENV_REF.sub(lambda m: os.environ.get(m.group(1), ""), value)
+    return ENV_REF.sub(lambda m: os.environ.get(m.group(1)) or (m.group(2) or ""), value)
 
 
 def expand_config(config: dict[str, Any], *, server: str) -> dict[str, Any]:
@@ -54,13 +62,20 @@ def _expand_value(value: Any, *, server: str, path: str) -> Any:
 
 def _expand_strict(value: str, *, server: str, path: str) -> str:
     def replace(match: re.Match[str]) -> str:
-        name = match.group(1)
-        try:
-            return os.environ[name]
-        except KeyError:
-            raise MissingEnvVar(
-                f"MCP server {server!r}: {path} references ${{{name}}}, which is not set. "
-                f"Set {name} in the environment, or drop the reference from mcp.json."
-            ) from None
+        name, default = match.group(1), match.group(2)
+        # POSIX `:-` semantics, which is what the CLI implements: an empty value
+        # counts as unset, so a var exported blank still falls back to the default.
+        supplied = os.environ.get(name)
+        if supplied:
+            return supplied
+        if default is not None:
+            # `${VAR:-}` is an author saying "empty is fine here", out loud. Only a
+            # bare `${VAR}` -- which says nothing -- is worth refusing to boot over.
+            return default
+        raise MissingEnvVar(
+            f"MCP server {server!r}: {path} references ${{{name}}}, which is unset or empty. "
+            f"Set {name} in the environment, give it a default (${{{name}:-…}}), "
+            f"or drop the reference."
+        )
 
     return ENV_REF.sub(replace, value)

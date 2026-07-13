@@ -97,6 +97,48 @@ With Docker Compose (includes a Postgres service):
 docker compose up
 ```
 
+### 5. Give jean tools: MCP servers
+
+`mcp.json` (at `$JEAN_HOME/mcp.json`, or wherever `JEAN_MCP_CONFIG_PATH` points --
+mount it from a Secret in production) is where you tell jean about the tools it has.
+Two kinds of entry:
+
+- **stdio** (has a `command`) -- jean runs the server itself, once per worker, and
+  proxies its tools in-process. Never let the CLI spawn these; see `ARCHITECTURE.md`.
+- **remote** (has a `url`, no `command`) -- an HTTP/SSE server jean does not run. The
+  CLI connects to it directly.
+
+**Register every HTTP API that speaks MCP.** A server jean knows about surfaces as real
+tools (`mcp__portico__…`) with real schemas, and those are auto-allowed -- the agent
+calls them without an approval click. An HTTP API jean is *not* told about gets reached
+with `curl` through `Bash` instead, and **every `Bash` call costs a human an approval
+click**. The difference is not cosmetic: one unregistered MCP server turned a single
+"list our open Jira tickets" question into eleven Approve clicks in four minutes, with
+the agent guessing at tool names it had no schema for.
+
+```json
+{
+  "mcpServers": {
+    "portico": {
+      "type": "http",
+      "url": "https://portico.int.okadoc.net/mcp",
+      "headers": { "Authorization": "Bearer ${PORTICO_ACCESS_TOKEN}" }
+    }
+  }
+}
+```
+
+`${VAR}` is read from jean's environment, so a credential stays in the environment
+(Vault → env, like every other jean secret) instead of being copied into the mounted
+config. **A `${VAR}` that is not set is a boot failure**, not a warning: jean refuses to
+start rather than send an empty credential, 401 on every call, and leave the agent to
+fall back to `curl` -- straight back to the click storm.
+
+> **A registered server's tools are ALL auto-allowed, writes included.** Registering an
+> Atlassian MCP server means jean can file a Jira ticket with no button click. Register
+> only servers whose token is scoped to what jean should be allowed to do -- the token is
+> the blast radius, because the approval gate is not in this path.
+
 ## Using jean in Slack
 
 - **Mention it** (`@jean ...`) in any channel it's in, or **DM it directly**

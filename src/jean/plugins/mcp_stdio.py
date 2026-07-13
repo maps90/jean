@@ -3,9 +3,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
-import re
 from collections.abc import Awaitable, Callable
 from typing import Any, Protocol
+
+from jean.plugins.env_refs import expand
 
 # Spawning and reaping a stdio MCP server. jean runs these itself (see
 # mcp_client.py) rather than letting the CLI fork its own copy per session --
@@ -20,8 +21,6 @@ PROTOCOL_VERSION = "2024-11-05"
 # plausible tool list, and is only ever a buffer ceiling, not an allocation.
 STREAM_LIMIT = 16 * 1024 * 1024
 
-_ENV_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
-
 
 class McpProcess(Protocol):
     """Structural: `asyncio.subprocess.Process` satisfies this as-is."""
@@ -35,11 +34,6 @@ class McpProcess(Protocol):
 
 
 SpawnFn = Callable[[dict[str, Any]], Awaitable[McpProcess]]
-
-
-def expand(value: str) -> str:
-    """`${ES_URL}` in a plugin's .mcp.json -- the CLI expands these, so must we."""
-    return _ENV_REF.sub(lambda m: os.environ.get(m.group(1), ""), value)
 
 
 async def spawn_stdio_server(config: dict[str, Any]) -> McpProcess:

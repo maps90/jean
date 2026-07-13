@@ -3,6 +3,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
+from jean.plugins.env_refs import MissingEnvVar
 from jean.plugins.mcp_config import (
     plugin_mcp_servers,
     remote_servers,
@@ -96,3 +99,56 @@ def test_taking_over_is_idempotent(tmp_path):
     take_over_plugin_mcp([p])  # a cached clone: already taken over
 
     assert list(stdio_servers({}, [p])) == ["plugin_kubectl_kubernetes"]
+
+
+def test_a_remote_servers_credential_comes_from_the_environment(monkeypatch):
+    """Registering an HTTP API as the MCP server it already is is what keeps it
+    off the Bash/curl path -- where every single call costs a human an approval
+    click. Its token reaches it from the env, so the mounted mcp.json holds no
+    second copy of a credential to rotate."""
+    monkeypatch.setenv("PORTICO_ACCESS_TOKEN", "sekrit")
+    extra = {
+        "portico": {
+            "type": "http",
+            "url": "https://portico.int.okadoc.net/mcp",
+            "headers": {"Authorization": "Bearer ${PORTICO_ACCESS_TOKEN}"},
+        }
+    }
+
+    assert remote_servers(extra) == {
+        "portico": {
+            "type": "http",
+            "url": "https://portico.int.okadoc.net/mcp",
+            "headers": {"Authorization": "Bearer sekrit"},
+        }
+    }
+
+
+def test_a_remote_server_missing_its_credential_fails_at_boot(monkeypatch):
+    """remote_servers() runs at boot (server.py). Better a crashloop naming the
+    variable than a jean that boots clean and 401s on every call -- which sends
+    the agent back to curl, i.e. back to one approval click per call."""
+    monkeypatch.delenv("PORTICO_ACCESS_TOKEN", raising=False)
+    extra = {
+        "portico": {
+            "type": "http",
+            "url": "https://portico.int.okadoc.net/mcp",
+            "headers": {"Authorization": "Bearer ${PORTICO_ACCESS_TOKEN}"},
+        }
+    }
+
+    with pytest.raises(MissingEnvVar, match="PORTICO_ACCESS_TOKEN"):
+        remote_servers(extra)
+
+
+def test_a_stdio_servers_config_is_not_expanded_here(monkeypatch):
+    """stdio configs are expanded at spawn (mcp_stdio), and only in their `env`
+    block. remote_servers() must not reach into them at all -- an unset var in a
+    stdio config must not take the whole pod down."""
+    monkeypatch.delenv("NOT_SET_ANYWHERE", raising=False)
+    extra = {"local": {"command": "npx", "args": ["${NOT_SET_ANYWHERE}"]}}
+
+    assert remote_servers(extra) == {}
+    assert stdio_servers(extra, []) == {
+        "local": {"command": "npx", "args": ["${NOT_SET_ANYWHERE}"]}
+    }

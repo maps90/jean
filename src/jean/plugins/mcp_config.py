@@ -5,6 +5,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from jean.plugins.env_refs import expand_config
 from jean.ports import ResolvedPlugin
 
 logger = logging.getLogger(__name__)
@@ -61,12 +62,28 @@ def stdio_servers(extra_mcp: dict[str, Any], plugins: list[ResolvedPlugin]) -> d
 
 
 def remote_servers(extra_mcp: dict[str, Any]) -> dict[str, Any]:
-    """The http/sse servers in mcp.json, handed to the CLI untouched.
+    """The http/sse servers in mcp.json, with their `${VAR}` references resolved.
 
     There is no child process to share: every session's CLI just opens its own
     connection to the same remote server, which is what jean wants anyway.
+
+    Expanded here rather than left to the CLI because the SDK ships these as an
+    inline `--mcp-config` JSON blob, not as a .mcp.json on disk -- so whether the
+    CLI would expand them is undocumented, and a bearer token is not the thing to
+    find that out with. Expanding is idempotent: if the CLI expands too, jean has
+    already substituted and there is nothing left for it to find.
+
+    Strict (env_refs.expand_config), so an unset var raises at boot. Registering
+    an HTTP API as the MCP server it already is is precisely what keeps it off the
+    Bash/curl path, where every call costs a human an approval click -- and a
+    silently blank credential would 401 every call and send the agent right back
+    to curl.
     """
-    return {name: cfg for name, cfg in extra_mcp.items() if "command" not in cfg}
+    return {
+        name: expand_config(cfg, server=name)
+        for name, cfg in extra_mcp.items()
+        if "command" not in cfg
+    }
 
 
 def take_over_plugin_mcp(plugins: list[ResolvedPlugin]) -> None:

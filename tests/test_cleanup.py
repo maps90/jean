@@ -82,9 +82,11 @@ async def test_sessions_and_approvals_expire_on_separate_schedules():
     assert seen == [{"sessions": 1_000_000.0 - 3 * 86400, "approvals": 1_000_000.0 - 30 * 86400}]
 
 
-def test_cleanup_interval_defaults_to_daily():
+async def test_cleanup_interval_defaults_to_daily():
     """A 3-day retention window swept weekly would let rows live ~10 days."""
-    scheduler = CleanupScheduler(
-        object(), session_retention_seconds=1, approval_retention_seconds=1
-    )
-    assert scheduler._interval_seconds == 86400
+    store = FakeStore(claim=True)
+    scheduler = CleanupScheduler(store, session_retention_seconds=1, approval_retention_seconds=1)
+
+    await scheduler.run_once()
+
+    assert store.claim_calls == [86400]

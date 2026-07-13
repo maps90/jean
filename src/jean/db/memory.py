@@ -88,9 +88,14 @@ class MemoryStore:
         return bool(row and row.engaged)
 
     async def bump_turn(self, channel: str, thread_ts: str) -> int:
+        # A newly created row must be touched (last_active_at=now), not left at
+        # the zero default -- otherwise it's already older than any retention
+        # cutoff and the next prune sweep deletes it before its first real turn.
+        # Bumping an *existing* row must not touch last_active_at -- the turn's
+        # own upsert_session call already does that.
         key = (channel, thread_ts)
         if key not in self._sessions:
-            await self.upsert_session(channel, thread_ts, touch=False)
+            await self.upsert_session(channel, thread_ts, touch=True)
         row = self._sessions[key]
         row.turn_seq += 1
         return row.turn_seq

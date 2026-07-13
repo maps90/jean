@@ -521,6 +521,25 @@ def _writing_client_factory(local: LocalTranscripts, content: dict[str, bytes | 
     return factory, calls
 
 
+def _appending_client_factory(local: LocalTranscripts, line: dict[str, bytes]):
+    """A client whose turn APPENDS the test's current `line` to whatever transcript
+    is on THIS worker's disk -- i.e. the CLI child continuing the conversation it
+    resumed, so the file it leaves behind shows which history the turn ran on."""
+
+    calls: list[dict] = []
+
+    class AppendingClient(FakeSdkClient):
+        async def query(self, text: str) -> None:
+            await super().query(text)
+            local.write("sdk-session-abc", (local.read("sdk-session-abc") or b"") + line["data"])
+
+    def factory(*, options):
+        calls.append({"options": options})
+        return AppendingClient(options=options)
+
+    return factory, calls
+
+
 async def test_oversize_transcript_is_not_archived_and_survives_close(tmp_path: Path):
     """An early return from _archive (here: over max_transcript_bytes) must clear
     the archived flag left by an EARLIER successful archive -- otherwise close()
@@ -612,3 +631,51 @@ async def test_turn_seq_is_bumped_before_the_transcript_is_archived(tmp_path: Pa
     # turn_seq advanced even though the archive did not: another worker holding a
     # cached client for seq 1 now sees 2, drops it, and re-hydrates.
     assert (await store.get_session("C1", "111.0")).turn_seq == 2
+
+
+async def test_unarchived_local_transcript_loses_to_a_turn_another_worker_committed(
+    tmp_path: Path,
+):
+    """Two JeanSessions over one store = two workers on one thread. Worker A's
+    save() fails, so A keeps an un-archived local file -- but then worker B commits
+    a turn on top of the store's (older) copy, advancing turn_seq past A. A's file
+    is now not *newer* than the store, merely a divergent branch. On A's next turn
+    it must hydrate the store anyway: preferring its own file would archive a
+    history missing B's turn over B's, destroying an answer the user already saw."""
+    FakeSdkClient.instances.clear()
+    inner = MemoryStore()
+    store_a = FlakyTranscripts(inner)  # worker A's view of the store: save() can fail
+    chat = FakeChat()
+    local_a = LocalTranscripts(cli_home=tmp_path / "a", cwd=Path("/w"))
+    local_b = LocalTranscripts(cli_home=tmp_path / "b", cwd=Path("/w"))
+
+    line_a: dict[str, bytes] = {"data": b'{"turn":1,"by":"a"}\n'}
+    line_b: dict[str, bytes] = {"data": b'{"turn":2,"by":"b"}\n'}
+    factory_a, calls_a = _appending_client_factory(local_a, line_a)
+    factory_b, _calls_b = _appending_client_factory(local_b, line_b)
+
+    worker_a = _session(store_a, chat, factory_a, local_a)
+    worker_b = _session(inner, chat, factory_b, local_b)
+
+    store_a.fail_save = True
+    await worker_a.run_turn("first")  # turn_seq -> 1, but the archive fails
+    store_a.fail_save = False
+    assert await inner.load("C1", "111.0", "sdk-session-abc") is None  # store has nothing
+    assert local_a.read("sdk-session-abc") == b'{"turn":1,"by":"a"}\n'  # only A has turn 1
+
+    await worker_b.run_turn("second")  # B commits turn 2 on the store's history
+    assert await inner.load("C1", "111.0", "sdk-session-abc") == b'{"turn":2,"by":"b"}\n'
+    assert (await inner.get_session("C1", "111.0")).turn_seq == 2  # the store moved past A
+
+    line_a["data"] = b'{"turn":3,"by":"a"}\n'
+    await worker_a.run_turn("third")  # A's cached client is stale -> close() + _connect
+
+    # A resumed the STORE's transcript, not its own stale local branch ...
+    assert calls_a[1]["options"] == {"resume": "sdk-session-abc"}
+    assert local_a.read("sdk-session-abc") == b'{"turn":2,"by":"b"}\n{"turn":3,"by":"a"}\n'
+    # ... so B's turn is still there, not overwritten by A's un-archived turn 1
+    assert (
+        await inner.load("C1", "111.0", "sdk-session-abc")
+        == b'{"turn":2,"by":"b"}\n{"turn":3,"by":"a"}\n'
+    )
+    assert chat.replies == []  # the resume worked; no "I lost my memory" note

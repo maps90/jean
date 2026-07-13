@@ -91,6 +91,13 @@ class FakeStore:
         return PruneResult(approvals_deleted=0, sessions_deleted=0)
 
 
+async def _never_asked(tool_name, tool_input, context):
+    """build_agent_options requires a permission hook; these tests never run a
+    tool, so this stands in for the Slack approval one (build_can_use_tool is
+    covered in tests/test_tool_permission.py)."""
+    raise AssertionError("the permission hook should not be called here")
+
+
 def test_build_local_transcripts_matches_agent_cwd(tmp_path):
     """LocalTranscripts derives its directory by slugifying a cwd. That cwd
     MUST be the exact string build_agent_options hands the CLI as `cwd` --
@@ -109,6 +116,7 @@ def test_build_local_transcripts_matches_agent_cwd(tmp_path):
         plugins=[],
         settings=settings,
         resume=None,
+        can_use_tool=_never_asked,
     )
     expected_slug = re.sub(r"[/.]", "-", options.cwd)
     assert local.path("abc-123") == (
@@ -128,22 +136,31 @@ def test_build_session_factory_wires_transcript_store_and_local(tmp_path):
     )
     store = FakeStore()
     local = server.build_local_transcripts(settings)
+    bound: list[tuple[str, str]] = []
 
-    def options_factory(resume):
-        raise NotImplementedError
+    def options_factory_for(channel, thread_ts):
+        bound.append((channel, thread_ts))
+
+        def options_factory(resume, permission_mode):
+            raise NotImplementedError
+
+        return options_factory
 
     session_factory = server.build_session_factory(
         settings=settings,
         store=store,
         chat=FakeChat(),
         routing=RoutingContext(),
-        options_factory=options_factory,
+        options_factory_for=options_factory_for,
         client_factory=lambda **kwargs: None,
         local_transcripts=local,
     )
     session = session_factory("C1", "111.222")
 
     assert isinstance(session, JeanSession)
+    # The options factory is built PER SESSION, closed over this thread: it carries
+    # the SDK permission hook, which must ask for approval in the right thread.
+    assert bound == [("C1", "111.222")]
     # White-box: JeanSession exposes no public accessor for its collaborators,
     # so this is the only way to prove the *same* store object was handed in
     # as both SessionStore and TranscriptStore, and that max_transcript_bytes

@@ -72,7 +72,8 @@ Slack (Socket Mode)  ── load-balances events across all connected workers �
 | `slack/mcp.py` | In-process `jean_slack` MCP tools the agent speaks through |
 | `approval/authz.py` | Select authorized approvers by scope keyword match |
 | `approval/gate.py` | Block Kit approval requests via the `ApprovalCoordinator` port |
-| `session/session.py` | One resumable claude-agent turn loop per thread; hydrates/archives its transcript around each turn, dropping a cached client when `turn_seq` moved without it |
+| `approval/policy.py` | Renders a tool call as the request a human approves (and why a denial says what it says) |
+| `session/session.py` | One resumable claude-agent turn loop per thread; hydrates/archives its transcript around each turn, dropping a cached client when `turn_seq` or the permission mode moved without it |
 | `session/transcript.py` | Locate/read/write the claude CLI's on-disk transcript for a session id |
 | `session/manager.py` | Per-worker session cache + `ThreadLock` serialization + idle sweep |
 | `gateway/engagement.py` | Pure engagement decision (mention / disengage / DM / reply) |
@@ -94,8 +95,12 @@ Slack (Socket Mode)  ── load-balances events across all connected workers �
    hands the turn to `SessionManager`.
 3. `JeanSession` opens (or resumes, via the stored `sdk_session_id`) a
    `ClaudeSDKClient`, sets a "thinking…" status, and feeds the message.
-4. The agent works; to speak it calls `mcp__jean_slack__reply`. Before any
-   mutating action it calls `mcp__jean_slack__request_approval`.
+4. The agent works; to speak it calls `mcp__jean_slack__reply`. Any tool the CLI
+   will not auto-allow -- Bash, Write, Edit; i.e. everything outside
+   `allowed_tools` and its read-only set -- suspends on the SDK's `can_use_tool`
+   hook (`agent_options.build_can_use_tool`), which asks the same gate. The agent
+   can also ask for itself with `mcp__jean_slack__request_approval`, but it cannot
+   opt *out*: the hook fires whether or not the persona cooperates.
 5. The approval is persisted and posted as Block Kit buttons. Whichever worker
    receives the click resolves it in Postgres and fires `NOTIFY`; the waiting
    worker wakes and the turn continues.

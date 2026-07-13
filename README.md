@@ -54,6 +54,7 @@ Copy `.env.example` to `.env` and fill in:
 | `CLAUDE_CODE_OAUTH_TOKEN` | one of these two | use a Claude Pro/Max subscription instead of API billing. Generate on a machine already logged into Claude Code: `claude setup-token`, then paste the `sk-ant-oat01-...` token here |
 | `JEAN_DATABASE_URL` | yes (or rely on the compose default) | `postgresql://user:pass@host:5432/db` |
 | `JEAN_HOME` | no | defaults to `~/.jean` |
+| `JEAN_APPROVERS` | no | comma-separated Slack user ids (`U11111,U22222`) used **only** when `IDENTITY.md` names nobody who can approve a given action. A safety net for a soul that fails to parse -- see "Who gets asked" below |
 | `JEAN_IDLE_MINUTES`, `JEAN_APPROVAL_TTL`, `JEAN_PERMISSION_MODE`, `JEAN_HEALTH_PORT`, `JEAN_MODEL`, `JEAN_SOUL_PARSE_MODEL` | no | see `.env.example` for defaults |
 | `JEAN_CLEANUP_ENABLED` | no | Postgres retention cleanup (default: `true`). One worker per cycle prunes, via an advisory lock. |
 | `JEAN_SESSION_RETENTION_DAYS` | no | delete sessions idle longer than this (default: `3`). The session's transcript cascades away with the row — **and so do `engaged` and `permission_mode`**, so a thread that has been quiet this long needs a fresh `@jean` mention to re-engage. |
@@ -109,6 +110,24 @@ docker compose up
 - Before jean does anything that mutates something outside the conversation,
   it posts a Block Kit approval request and waits for an authorized approver
   to click Approve/Deny (or for the request to time out and auto-deny).
+
+### Who gets asked
+
+Only the people jean picks here may click Approve/Deny -- a click from anyone
+else is rejected. The set is chosen in code (never by the model), taking the
+first rung that yields anyone:
+
+1. **Scope match** -- every approver whose `scope` keywords appear in the
+   action's summary (`<@U0456EFGH> ... (scope: deploy, release, infra)`).
+2. **Catch-all approver** -- anyone `IDENTITY.md` marks as approving anything
+   ("is the catch-all approver for anything else").
+3. **`JEAN_APPROVERS`** -- the env-level backstop.
+4. **The manager** -- the person `IDENTITY.md` says jean answers to.
+
+If all four are empty, jean **refuses the action** and says so in the thread.
+It does not post buttons in that case: with nobody authorized, every click
+would be rejected and the request would simply hang until it timed out. Give
+jean at least a manager or a catch-all approver.
 
 ## Horizontal scaling
 

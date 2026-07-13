@@ -64,8 +64,15 @@ def _make_gate(approved: bool):
     async def post_blocks(channel, thread_ts, text, blocks):
         return "1000.1"
 
+    async def update_blocks(channel, ts, text, blocks):
+        return None
+
     gate = ApprovalGate(
-        post_blocks, coordinator, approvers_provider=lambda: approvers, timeout_seconds=5
+        post_blocks,
+        coordinator,
+        update_blocks=update_blocks,
+        approvers_provider=lambda: approvers,
+        timeout_seconds=5,
     )
 
     async def fake_request(channel, thread_ts, summary):

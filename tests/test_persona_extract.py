@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from jean.approval.authz import select_approvers
 from jean.config import Settings
 from jean.persona.extract import assert_ids_grounded, load_soul_data, regex_fallback
 from jean.persona.model import ApproverEntry, Identity, Manager, SoulData
@@ -52,6 +53,67 @@ def test_regex_fallback_finds_grounded_manager_and_approver():
     assert soul.manager.user_id == "U11111"
     assert any(a.user_id == "U22222" for a in soul.approvers)
     assert_ids_grounded(soul, PERSONA)  # everything the fallback found must be grounded
+
+
+# The IDENTITY.md format README tells every operator to write, verbatim.
+README_PERSONA = """\
+# jean
+
+I am jean, an AI teammate for the engineering team.
+
+My manager is <@U0123ABCD>. I take direction from them and keep them
+informed of anything important.
+
+Approvers:
+- <@U0456EFGH> approves deploys and infra changes (scope: deploy, release, infra)
+- <@U0123ABCD> is the catch-all approver for anything else
+
+I live in #eng-jean and can be DMed directly.
+"""
+
+
+def test_regex_fallback_reads_the_readme_catchall_approver():
+    """The fallback must be able to express a catch-all approver. It could not:
+    it never set catchall=True, so an approval whose summary missed every scope
+    keyword resolved to nobody and could not be approved by anyone."""
+    soul = regex_fallback(README_PERSONA)
+    catchalls = {a.user_id for a in soul.approvers if a.catchall}
+    assert catchalls == {"U0123ABCD"}
+
+
+def test_regex_fallback_keeps_an_approver_who_is_also_the_manager():
+    """The manager is usually the catch-all approver. The fallback used to skip
+    any approver whose id matched the manager's, dropping exactly that person."""
+    soul = regex_fallback(README_PERSONA)
+    assert soul.manager is not None and soul.manager.user_id == "U0123ABCD"
+    assert "U0123ABCD" in {a.user_id for a in soul.approvers}
+
+
+def test_regex_fallback_keeps_scoped_approver_scoped():
+    soul = regex_fallback(README_PERSONA)
+    scoped = next(a for a in soul.approvers if a.user_id == "U0456EFGH")
+    assert scoped.catchall is False
+    assert "deploy" in scoped.scope and "infra" in scoped.scope
+
+
+def test_readme_persona_always_yields_an_approver():
+    """End to end over the documented format: an off-scope summary (the one that
+    broke in production -- a doc upload matches no deploy/infra keyword) must
+    still resolve to a human, not to an empty set."""
+    soul = regex_fallback(README_PERSONA)
+    chosen = select_approvers(
+        'Upload a Markdown file "Grafana_Production_Datasources_HowTo.md" to this Slack thread',
+        soul.approvers,
+        manager=soul.manager.user_id if soul.manager else None,
+    )
+    assert chosen == {"U0123ABCD"}
+
+
+def test_regex_fallback_prose_manager_does_not_become_an_approver():
+    """Splitting on sentence ends, not just lines: the manager sentence and the
+    approver sentence are separate, so the manager is not swept in by proximity."""
+    soul = regex_fallback(PERSONA)
+    assert {a.user_id for a in soul.approvers} == {"U22222"}
 
 
 def test_regex_fallback_on_empty_persona_has_no_manager():

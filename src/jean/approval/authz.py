@@ -17,11 +17,19 @@ def select_approvers(
     approvers: list[ApproverEntry],
     *,
     env_fallback: Iterable[str] = (),
+    manager: str | None = None,
 ) -> set[str]:
     """Pick who must approve `summary`. Priority: keyword match against each
     non-catchall approver's `scope` > any catchall approver > `env_fallback`
-    > empty set. Pure and code-side by design -- this is the trust boundary's
-    authorization logic, never something the model decides."""
+    > `manager` > empty set. Pure and code-side by design -- this is the trust
+    boundary's authorization logic, never something the model decides.
+
+    The `manager` rung exists because an empty result is not a safe default but
+    a dead end: the gate authorizes clicks against this set, so nobody -- not
+    even the manager -- can resolve an approval it did not name. Falling back to
+    the person jean already answers to keeps a scoped-only IDENTITY.md (no
+    catch-all) from silently making every off-scope action unapprovable.
+    """
     summary_lower = summary.lower()
 
     keyword_matches = {
@@ -40,4 +48,4 @@ def select_approvers(
     if env_fallback_set:
         return env_fallback_set
 
-    return set()
+    return {manager} if manager else set()

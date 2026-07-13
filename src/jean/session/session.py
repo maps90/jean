@@ -8,7 +8,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from jean.ports import ChatSurface, SessionStore, TranscriptStore
+from jean.ports import ChatSurface, SessionRow, SessionStore, TranscriptStore
 from jean.session.transcript import LocalTranscripts
 
 logger = logging.getLogger(__name__)
@@ -64,7 +64,7 @@ class JeanSession:
         store: SessionStore,
         chat: ChatSurface,
         routing: RoutingContext,
-        options_factory: Callable[[str | None], Any],
+        options_factory: Callable[[str | None, str | None], Any],
         client_factory: Callable[..., Any],
         transcripts: TranscriptStore,
         local: LocalTranscripts,
@@ -89,6 +89,9 @@ class JeanSession:
         self._settle_interval = settle_interval
         self._settle_quiet = settle_quiet
         self._client: Any | None = None
+        # The permission mode the cached client was opened with; the SDK fixes
+        # it at connect, so a later /mode only lands on a fresh client.
+        self._mode: str | None = None
         self._seen_seq: int = 0  # turn_seq this instance's client is current with
         self._sid: str | None = None  # session id its transcript is stored under
         self._live_sid: str | None = None  # id of the .jsonl the OPEN client writes to
@@ -104,8 +107,8 @@ class JeanSession:
         (approval_ttl 30min > idle_minutes 15), so "idle" is not "not running"."""
         return self._busy
 
-    async def _open(self, resume: str | None) -> Any:
-        options = self._options_factory(resume)
+    async def _open(self, resume: str | None, permission_mode: str | None) -> Any:
+        options = self._options_factory(resume, permission_mode)
         client = self._client_factory(options=options)
         try:
             await client.__aenter__()
@@ -113,9 +116,10 @@ class JeanSession:
             with contextlib.suppress(Exception):
                 await client.__aexit__(None, None, None)
             raise
+        self._mode = permission_mode
         return client
 
-    async def _connect(self) -> Any:
+    async def _connect(self, row: SessionRow | None) -> Any:
         """Connect a client, resuming the stored sdk_session_id when there is one.
 
         The stored id can outlive the transcript it names: the CLI writes each
@@ -139,14 +143,20 @@ class JeanSession:
         than by parsing the CLI's stderr: if connecting without `resume` fails
         too, it was never the resume -- propagate, and leave the stored id
         alone.
+
+        `row` is read once by run_turn and passed in (rather than re-fetched
+        here) so the two things a connect depends on -- the id/transcript to
+        resume and the thread's permission_mode, which the SDK bakes in at
+        connect and cannot change later -- come from the SAME snapshot as the
+        staleness checks that decided to call us.
         """
         committed_seq = self._seen_seq  # the turn_seq THIS instance last committed
-        row = await self._store.get_session(self._channel, self._thread_ts)
         resume = row.sdk_session_id if row else None
+        mode = row.permission_mode if row else None
         self._seen_seq = row.turn_seq if row else 0
         if resume is None:
             self._live_sid = None  # a fresh session writes a .jsonl we cannot name yet
-            return await self._open(None)
+            return await self._open(None, mode)
 
         # ... unless OUR local file is the newer copy. `_archived is False` for
         # `_sid` means the store never took our last turn (a save() failed, or the
@@ -179,9 +189,9 @@ class JeanSession:
             if data is not None:
                 self._local.write(resume, data)
         try:
-            client = await self._open(resume)
+            client = await self._open(resume, mode)
         except Exception:
-            client = await self._open(None)
+            client = await self._open(None, mode)
             # Only now do we know the resume id itself was refused: a failure that
             # was never about the resume (bad auth, bad --plugin-dir) would have
             # failed here too and propagated, leaving the file untouched. So the
@@ -344,17 +354,24 @@ class JeanSession:
         self._busy = True
         await self._chat.set_status(self._channel, self._thread_ts, "is thinking...")
         try:
+            # One read of the row serves both reasons a cached client can be wrong.
+            row = await self._store.get_session(self._channel, self._thread_ts)
             if self._client is not None:
-                # Another worker may have taken a turn on this thread since we
-                # cached this client. A cached client never re-reads the store,
-                # so it would answer from a history missing that turn and
-                # archive over it. The stored turn_seq is how we notice.
-                row = await self._store.get_session(self._channel, self._thread_ts)
-                if row is None or row.turn_seq != self._seen_seq:
-                    await self.close()
-
+                # `/mode` may have run since this client was opened -- on this worker
+                # or, in the stateless-worker model, on any other one. permission_mode
+                # is baked into the client at connect, so honour a change by dropping
+                # the cached client; the reconnect below resumes the same sdk session.
+                mode_changed = (row.permission_mode if row else None) != self._mode
+                # Another worker may also have taken a turn on this thread since we
+                # cached this client. A cached client never re-reads the store, so it
+                # would answer from a history missing that turn and archive over it.
+                # The stored turn_seq is how we notice; _connect then re-hydrates.
+                stale = row is None or row.turn_seq != self._seen_seq
+                if mode_changed or stale:
+                    with contextlib.suppress(Exception):
+                        await self.close()
             if self._client is None:
-                self._client = await self._connect()
+                self._client = await self._connect(row)
 
             sid: str | None = None
             # Clear `_archived` HERE, not in _archive(): the flag means "the store's

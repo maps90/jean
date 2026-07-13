@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import logging
 
 from jean.agent_options import build_agent_options
@@ -14,39 +13,33 @@ def _settings(monkeypatch):
     return Settings.load()
 
 
-def test_merges_slack_and_external_mcp(monkeypatch):
+def test_merges_slack_and_proxied_mcp(monkeypatch):
     opts = build_agent_options(
         persona_text="I am jean.",
         slack_server={"_": "slack"},
         slack_tool_names=["mcp__jean_slack__reply"],
-        extra_mcp={"kubernetes": {"command": "npx"}},
+        mcp_servers={"kubernetes": {"_": "proxy"}},
         plugins=[ResolvedPlugin("grafana", "/opt/mp/plugins/grafana")],
         settings=_settings(monkeypatch),
         resume=None,
     )
     assert opts.mcp_servers["jean_slack"] == {"_": "slack"}
-    assert opts.mcp_servers["kubernetes"] == {"command": "npx"}
+    assert opts.mcp_servers["kubernetes"] == {"_": "proxy"}
     assert opts.plugins == [{"type": "local", "path": "/opt/mp/plugins/grafana"}]
     assert opts.skills == "all"
     assert opts.strict_mcp_config is False
 
 
-def test_plugin_tools_are_allowed_by_server_not_by_a_bare_wildcard(monkeypatch, tmp_path):
+def test_tools_are_allowed_by_server_not_by_a_bare_wildcard(monkeypatch):
     """`mcp__*` is rejected by the CLI ("Wildcard tool name mcp__* is not
     supported in allow rules") and the rule is dropped, which left every plugin
     tool unreachable in production. The allow pattern must name its server."""
-    plugin = tmp_path / "kubectl"
-    plugin.mkdir()
-    (plugin / ".mcp.json").write_text(
-        json.dumps({"mcpServers": {"kubernetes": {"command": "npx"}}})
-    )
-
     opts = build_agent_options(
         persona_text="I am jean.",
         slack_server={"_": "slack"},
         slack_tool_names=["mcp__jean_slack__reply"],
-        extra_mcp={"grafana": {"command": "npx"}},
-        plugins=[ResolvedPlugin("kubectl", str(plugin))],
+        mcp_servers={"plugin_kubectl_kubernetes": {"_": "proxy"}, "grafana": {"_": "proxy"}},
+        plugins=[ResolvedPlugin("kubectl", "/opt/mp/plugins/kubectl")],
         settings=_settings(monkeypatch),
         resume=None,
     )
@@ -62,7 +55,7 @@ def test_no_plugins_no_extra_mcp(monkeypatch):
         persona_text="I am jean.",
         slack_server={"_": "slack"},
         slack_tool_names=["mcp__jean_slack__reply"],
-        extra_mcp={},
+        mcp_servers={},
         plugins=[],
         settings=_settings(monkeypatch),
         resume="sess-123",
@@ -78,7 +71,7 @@ def test_agent_name_reaches_the_system_prompt(monkeypatch):
         agent_name="Anya",
         slack_server={"_": "slack"},
         slack_tool_names=["mcp__jean_slack__reply"],
-        extra_mcp={},
+        mcp_servers={},
         plugins=[],
         settings=_settings(monkeypatch),
         resume=None,
@@ -95,7 +88,7 @@ def test_cli_stderr_is_routed_to_the_logger(monkeypatch, caplog):
         persona_text="I am jean.",
         slack_server={"_": "slack"},
         slack_tool_names=["mcp__jean_slack__reply"],
-        extra_mcp={},
+        mcp_servers={},
         plugins=[],
         settings=_settings(monkeypatch),
         resume=None,

@@ -122,6 +122,14 @@ default_headers={"anthropic-beta": "oauth-2025-04-20"})` or the API returns 401.
 
 - In-process MCP tools surface as `mcp__jean_slack__<tool>` (server key `jean_slack`). List
   them in `allowed_tools`.
+- **jean owns the external MCP servers, not the CLI.** stdio transport *is* a child process,
+  so a per-session `ClaudeSDKClient` cannot share one — hand the CLI a stdio server (in
+  `mcp_servers`, or in a plugin's `.mcp.json`) and it forks its own copy of it for *every*
+  session. That is what exhausted the pod's memory. Instead `plugins/mcp_client.py` runs each
+  server once per worker and `plugins/mcp_proxy.py` re-exposes its tools as an in-process SDK
+  server, keyed so the tool ids are unchanged (`mcp__plugin_kubectl_kubernetes__pods_list`).
+  `take_over_plugin_mcp()` renames a plugin's `.mcp.json` so the CLI cannot spawn it behind
+  jean's back. Never put a stdio server config into `ClaudeAgentOptions.mcp_servers`.
 - `@tool(name, description, input_schema)` wraps an **async** `fn(args: dict) -> dict` that
   returns `{"content": [{"type": "text", "text": …}], "is_error"?: True}`. Keep each tool's
   logic in a plain async function so it's unit-testable without the SDK wrapper.

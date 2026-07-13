@@ -128,11 +128,18 @@ the agent guessing at tool names it had no schema for.
 }
 ```
 
-`${VAR}` is read from jean's environment, so a credential stays in the environment
-(Vault → env, like every other jean secret) instead of being copied into the mounted
-config. **A `${VAR}` that is not set is a boot failure**, not a warning: jean refuses to
-start rather than send an empty credential, 401 on every call, and leave the agent to
-fall back to `curl` -- straight back to the click storm.
+**A plugin can declare its own servers**, in its `.mcp.json`, and jean registers them the
+same way -- stdio ones it runs and proxies, http ones it hands to the CLI. You do not
+copy a plugin's server into `mcp.json` by hand. A plugin's http server is keyed by the
+name it declares (so `"portico"` → `mcp__portico__…`), and two servers claiming the same
+name is a boot error, because that name is the tool prefix and one would shadow the other.
+
+`${VAR}` and `${VAR:-default}` are read from jean's environment, so a credential stays in
+the environment (Vault → env, like every other jean secret) instead of being copied into
+the mounted config. **A `${VAR}` that is unset or empty, with no default, is a boot
+failure** -- not a warning. jean refuses to start rather than send an empty credential,
+401 on every call, and leave the agent to fall back to `curl`: straight back to the click
+storm.
 
 > **A registered server's tools are ALL auto-allowed, writes included.** Registering an
 > Atlassian MCP server means jean can file a Jira ticket with no button click. Register

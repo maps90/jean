@@ -123,6 +123,7 @@ and no DB — `monkeypatch.setenv` and assert:
 ## Follow-up, outside this repo
 
 - **flux-infra:** add the `portico` block above to jean's mounted `mcp.json`.
-- **oka-skills / IDENTITY.md:** whatever instructs the `curl https://portico…/mcp` pattern
-  must be updated to point at the `mcp__portico__*` tools. Left in place, jean will keep
-  curling out of habit even once the real tools are sitting right next to it.
+- **oka-skills, `portico` skill:** this is where the `curl https://portico…/mcp` pattern is
+  taught. It must be rewritten to call the `mcp__portico__*` tools. Left in place, jean will
+  keep curling out of habit even once the real tools are sitting right next to it — and every
+  one of those curls is an approval click, so the skill alone can undo this whole change.

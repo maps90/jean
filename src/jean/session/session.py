@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import math
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -55,8 +56,11 @@ class JeanSession:
         transcripts: TranscriptStore,
         local: LocalTranscripts,
         max_transcript_bytes: int,  # no default: Settings.transcript_max_mb owns the number
-        settle_timeout: float = 5.0,
+        # The settle wait (see _settle). Defaults kept only so a test can build a
+        # JeanSession without caring; production wires all three from Settings.
+        settle_timeout: float = 10.0,
         settle_interval: float = 0.1,
+        settle_quiet: float = 1.0,
     ) -> None:
         self._channel = channel
         self._thread_ts = thread_ts
@@ -70,6 +74,7 @@ class JeanSession:
         self._max_transcript_bytes = max_transcript_bytes
         self._settle_timeout = settle_timeout
         self._settle_interval = settle_interval
+        self._settle_quiet = settle_quiet
         self._client: Any | None = None
         self._seen_seq: int = 0  # turn_seq this instance's client is current with
         self._sid: str | None = None  # session id its transcript is stored under
@@ -187,23 +192,34 @@ class JeanSession:
         )
         return client
 
-    async def _settle(self, sdk_session_id: str, baseline: int) -> None:
+    async def _settle(self, sdk_session_id: str, target: int) -> None:
         """Wait for the CLI to finish writing this turn to its .jsonl.
 
         The CLI's transcript writes are write-behind: when `receive_response()`
-        returns, the user has their answer but the assistant record for this turn is
+        returns, the user has their answer but the `assistant` record carrying it is
         typically NOT on disk yet (measured against the real CLI: it catches up on
         its own ~0.5s later, without the client being closed). Archiving at that
-        moment persists a transcript whose last turn is a dangling user message --
-        and it is silent: a cold worker hydrates that copy, the CLI sees a user turn
-        with no answer, injects a "Continue from where you left off." turn of its
-        own, and the real answer is gone from the durable copy forever.
+        moment persists a transcript whose last turn has no answer in it -- and it is
+        silent: a cold worker hydrates that copy, the CLI sees a turn left hanging,
+        injects a "Continue from where you left off." turn of its own, and the real
+        answer is gone from the durable copy forever.
 
-        So poll until the file has settled: (a) the turn's `assistant` record has
-        landed -- the count has risen above the BASELINE taken before query(), so
-        THIS turn's answer is what we wait for, not one already on disk when it
-        started -- and (b) the size has stopped changing, so the records the CLI
-        trails after it (`last-prompt`) land too.
+        Waiting for the count to merely RISE does not fix that, because a turn is not
+        one `assistant` record. A real jean turn is a TOOL turn -- persona/identity.py
+        mandates that every visible reply goes out through `mcp__jean_slack__reply` --
+        and the CLI writes an `assistant` record per assistant message: thinking, each
+        tool_use, then the final text. It flushes the early ones MID-TURN, so by the
+        time we get here the count is already above any baseline, satisfied by a
+        tool_use whose answer is still unwritten. (Worse: land in the gap between a
+        tool_use and its tool_result and the archived history ends on an unresolved
+        tool call.) So wait for an EXACT `target`: the records already on disk before
+        query() plus the AssistantMessages the SDK streamed for this turn -- one per
+        record the CLI owes the file (see run_turn).
+
+        Then keep waiting until the file goes quiet, because `system` records trail
+        the final `assistant` one by ~0.1s. Quiet means several CONSECUTIVE unchanged
+        readings spanning `settle_quiet`: a single unchanged 100ms sample proves
+        nothing against a writer that pauses for longer than that between records.
 
         Bounded: if the timeout expires we archive what is there anyway (an
         incomplete transcript still beats none) and say so loudly. The user already
@@ -213,21 +229,27 @@ class JeanSession:
             return  # nothing on disk to settle -- _archive logs that as its own problem
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self._settle_timeout
-        last_size = -1  # no size seen yet, so the first poll can never look "unchanged"
+        quiet_needed = max(1, math.ceil(self._settle_quiet / self._settle_interval))
+        last_size = -1  # no size seen yet, so the first reading can never look "unchanged"
+        quiet = 0
         while True:
-            size = self._local.size(sdk_session_id)
-            if size == last_size and self._local.assistant_records(sdk_session_id) > baseline:
+            # In a thread: this stats and (when the file has grown) re-reads a
+            # transcript that may be tens of MB, and the event loop is also serving
+            # every other thread's turn on this worker and the approval LISTEN wakeup.
+            size, records = await asyncio.to_thread(self._local.sample, sdk_session_id)
+            quiet = quiet + 1 if size == last_size else 0
+            if records >= target and quiet >= quiet_needed:
                 return
             if loop.time() >= deadline:
                 logger.warning(
                     "transcript for %s/%s did not settle within %.1fs (%d assistant "
-                    "records, baseline %d) -- archiving it anyway, but it may be missing "
-                    "this last turn; a worker that resumes it would lose the answer",
+                    "records on disk, expected %d) -- archiving it anyway, but it may be "
+                    "missing this last turn; a worker that resumes it would lose the answer",
                     self._channel,
                     self._thread_ts,
                     self._settle_timeout,
-                    self._local.assistant_records(sdk_session_id),
-                    baseline,
+                    records,
+                    target,
                 )
                 return
             last_size = size
@@ -308,13 +330,30 @@ class JeanSession:
             # writes anything merely leaves the flag False over a local file that is
             # still identical to the store's -- harmless: we re-archive next turn.
             self._archived = False
-            # How many answers the transcript holds BEFORE this turn: 0 on a fresh
-            # session (no file yet), the hydrated count on a resumed one. _settle waits
-            # for this to rise, which is what tells it THIS turn's answer is on disk
-            # rather than one that was already there when the turn started.
-            baseline = self._local.assistant_records(self._live_sid) if self._live_sid else 0
+            # How many `assistant` records the transcript holds BEFORE this turn: 0 on
+            # a fresh session (no file yet), the hydrated count on a resumed one. This
+            # turn's records land ON TOP of these, so it is what _settle's target counts
+            # up from -- and it is counted against the file `baseline_sid` names, which
+            # is why we hold on to that id rather than re-reading `_live_sid` later (the
+            # receive loop below overwrites it).
+            baseline_sid = self._live_sid
+            baseline = (
+                (await asyncio.to_thread(self._local.sample, baseline_sid))[1]
+                if baseline_sid
+                else 0
+            )
+            assistant_msgs = 0
             await self._client.query(text)
             async for msg in self._client.receive_response():
+                # The SDK streams one AssistantMessage per `assistant` record the CLI
+                # writes -- so counting them here tells _settle EXACTLY how many records
+                # this turn still owes the .jsonl, instead of guessing. Matched by class
+                # NAME rather than isinstance: session/ is domain code and must not
+                # import claude_agent_sdk (CLAUDE.md's layering rule) -- the SDK reaches
+                # this class only as an injected client_factory, and its messages are
+                # duck-typed exactly like `session_id` is just below.
+                if type(msg).__name__ == "AssistantMessage":
+                    assistant_msgs += 1
                 got = getattr(msg, "session_id", None)
                 if got:
                     sid = got
@@ -346,7 +385,24 @@ class JeanSession:
                 self._seen_seq = await self._store.bump_turn(self._channel, self._thread_ts)
                 # ... but archive nothing until the CLI has actually written this turn:
                 # its .jsonl lags the response we have just finished streaming (_settle).
-                await self._settle(sid, baseline)
+                #
+                # The baseline only counts toward the target if it was counted against
+                # THIS turn's file. If the id moved (the resume was refused, so the turn
+                # ran in a fresh session under a new id), the baseline describes a
+                # different .jsonl and is almost certainly too high for this one: keeping
+                # it would set an unreachable target, burn the whole settle timeout on
+                # every turn, and warn about a truncation that never happened.
+                if baseline_sid is not None and baseline_sid != sid:
+                    logger.warning(
+                        "session id changed mid-turn for %s/%s (%s -> %s); counting this "
+                        "turn's transcript from zero",
+                        self._channel,
+                        self._thread_ts,
+                        baseline_sid,
+                        sid,
+                    )
+                    baseline = 0
+                await self._settle(sid, baseline + assistant_msgs)
                 await self._archive(sid)
         except BaseException:
             # Never leave a poisoned, non-None, un-entered client around: if

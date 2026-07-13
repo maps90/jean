@@ -58,6 +58,20 @@ class Settings(BaseSettings):
     # the database. Such a thread keeps working, but only on the worker holding it.
     transcript_max_mb: int = 32
 
+    # The CLI writes a turn to its .jsonl write-behind, so jean waits for the file to
+    # settle before archiving it (JeanSession._settle). All three are seconds.
+    #   settle_quiet    -- how long the file must stay unchanged to count as finished.
+    #                      Sized against the CLI's flush lag (~0.5s to the final
+    #                      `assistant` record, ~0.1s more for the `system` records that
+    #                      trail it), with room to spare: too short and jean archives a
+    #                      turn missing its answer, which a cold worker then resumes.
+    #   settle_interval -- how often to sample the file while waiting.
+    #   settle_timeout  -- the ceiling. Hitting it archives whatever is on disk anyway
+    #                      and logs loudly; the user's turn is never failed over it.
+    settle_timeout: float = 10.0
+    settle_interval: float = 0.1
+    settle_quiet: float = 1.0
+
     @classmethod
     def load(cls) -> Settings:
         """Build Settings, wiring the two unprefixed auth env vars in."""

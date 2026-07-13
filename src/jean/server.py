@@ -86,6 +86,9 @@ def build_session_factory(
             transcripts=store,
             local=local_transcripts,
             max_transcript_bytes=settings.transcript_max_mb * 1024 * 1024,
+            settle_timeout=settings.settle_timeout,
+            settle_interval=settings.settle_interval,
+            settle_quiet=settings.settle_quiet,
         )
 
     return session_factory

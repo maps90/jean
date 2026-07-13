@@ -121,6 +121,22 @@ still exists, but only as the last resort for a transcript that is genuinely
 gone — expired by retention, or the very first turn — and it still says so
 in-thread when it happens.
 
+**Archiving waits for the CLI to finish writing.** Those `.jsonl` writes are
+write-behind: when `receive_response()` returns, the user has their answer but the
+`assistant` record carrying it is typically not on disk for another ~0.5s (with
+`system` records trailing it). Archiving right then persists a turn with no answer
+in it — and a cold worker that hydrates *that* hands the CLI a hanging turn, which
+it papers over with a synthetic "Continue from where you left off.", losing the
+real answer for good. Nor is it enough to wait for the `assistant` count to merely
+rise: a real jean turn always goes through `mcp__jean_slack__reply`, so it writes
+*several* `assistant` records (each tool_use, then the final text) and the CLI
+flushes the early ones mid-turn. So `JeanSession` waits for an exact target — the
+records already on disk before `query()`, plus the `AssistantMessage`s the SDK
+streamed this turn, one per record the CLI owes the file — and then for the file to
+go quiet (`JEAN_SETTLE_QUIET`, default 1s of unchanged size, sampled every
+`JEAN_SETTLE_INTERVAL`). `JEAN_SETTLE_TIMEOUT` caps the wait: hitting it archives
+whatever is on disk anyway and logs loudly, never failing the user's turn.
+
 ## Persistence
 
 Postgres holds four tables (created idempotently at boot):

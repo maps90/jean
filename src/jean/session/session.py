@@ -13,6 +13,19 @@ from jean.session.transcript import LocalTranscripts
 
 logger = logging.getLogger(__name__)
 
+# session/ is domain code and must not import claude_agent_sdk (CLAUDE.md's layering
+# rule), so run_turn matches the SDK's AssistantMessage structurally, by class name,
+# rather than importing the real class and using isinstance. This string is the whole
+# of that contract: if claude_agent_sdk ever renames the class, matching against a
+# hardcoded literal would silently stop counting -- collapsing the settle target to
+# baseline+0 and returning before the CLI finishes writing the turn (the exact
+# data-loss bug this module exists to prevent). tests/test_session.py pins this
+# constant against the real SDK class's `__name__`, so a rename fails that test
+# loudly instead. `_settle`'s `count_reliable` flag is the runtime backstop for the
+# same failure: if a turn streams zero matches despite otherwise succeeding, it falls
+# back to a conservative quiet-only wait instead of trusting target == baseline.
+ASSISTANT_MESSAGE_CLASS_NAME = "AssistantMessage"
+
 
 @dataclass
 class RoutingContext:
@@ -192,7 +205,7 @@ class JeanSession:
         )
         return client
 
-    async def _settle(self, sdk_session_id: str, target: int) -> None:
+    async def _settle(self, sdk_session_id: str, target: int, *, count_reliable: bool) -> None:
         """Wait for the CLI to finish writing this turn to its .jsonl.
 
         The CLI's transcript writes are write-behind: when `receive_response()`
@@ -224,9 +237,33 @@ class JeanSession:
         Bounded: if the timeout expires we archive what is there anyway (an
         incomplete transcript still beats none) and say so loudly. The user already
         has their answer; the turn is never failed over this.
+
+        `count_reliable=False` is run_turn's signal that it streamed zero
+        AssistantMessages for a turn that otherwise succeeded -- the structural
+        class-name match (see `ASSISTANT_MESSAGE_CLASS_NAME`) found nothing to count,
+        most likely because claude_agent_sdk renamed the class out from under it. A
+        completed turn always produces at least one `assistant` record, so `target`
+        (baseline + 0) is not trustworthy here: trusting it would satisfy `records >=
+        target` on the baseline alone and return before the CLI has written anything
+        of THIS turn -- the original data-loss bug, resurrected, with a green test
+        suite. So we warn loudly and drop the target check entirely, falling back to
+        the conservative rule instead: wait for the file to sit quiet for the full
+        window regardless of how many records that is. Slower, but it cannot
+        silently truncate.
         """
         if not self._local.path(sdk_session_id).exists():
             return  # nothing on disk to settle -- _archive logs that as its own problem
+        if not count_reliable:
+            logger.warning(
+                "could not count assistant messages for this turn on %s/%s (streamed "
+                "0 while the turn otherwise succeeded) -- jean cannot know when the "
+                "transcript is complete; likely cause: claude_agent_sdk renamed "
+                "AssistantMessage, breaking session.py's structural class-name match. "
+                "Falling back to waiting for the transcript to go quiet before "
+                "archiving.",
+                self._channel,
+                self._thread_ts,
+            )
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self._settle_timeout
         quiet_needed = max(1, math.ceil(self._settle_quiet / self._settle_interval))
@@ -238,7 +275,8 @@ class JeanSession:
             # every other thread's turn on this worker and the approval LISTEN wakeup.
             size, records = await asyncio.to_thread(self._local.sample, sdk_session_id)
             quiet = quiet + 1 if size == last_size else 0
-            if records >= target and quiet >= quiet_needed:
+            target_met = records >= target if count_reliable else True
+            if target_met and quiet >= quiet_needed:
                 return
             if loop.time() >= deadline:
                 logger.warning(
@@ -351,8 +389,11 @@ class JeanSession:
                 # NAME rather than isinstance: session/ is domain code and must not
                 # import claude_agent_sdk (CLAUDE.md's layering rule) -- the SDK reaches
                 # this class only as an injected client_factory, and its messages are
-                # duck-typed exactly like `session_id` is just below.
-                if type(msg).__name__ == "AssistantMessage":
+                # duck-typed exactly like `session_id` is just below. See
+                # ASSISTANT_MESSAGE_CLASS_NAME for what pins this string against the
+                # real SDK class, and _settle's `count_reliable` for what happens at
+                # runtime if it ever drifts.
+                if type(msg).__name__ == ASSISTANT_MESSAGE_CLASS_NAME:
                     assistant_msgs += 1
                 got = getattr(msg, "session_id", None)
                 if got:
@@ -402,7 +443,15 @@ class JeanSession:
                         sid,
                     )
                     baseline = 0
-                await self._settle(sid, baseline + assistant_msgs)
+                # A completed turn always writes at least one `assistant` record
+                # (persona/identity.py mandates every reply goes out through a tool
+                # call, so a real turn is thinking/tool_use/text at minimum), so
+                # `assistant_msgs == 0` here means the structural match above found
+                # nothing to count, not that the turn produced nothing. Trusting the
+                # target in that case would let _settle return the moment the
+                # baseline alone satisfies it -- see `_settle`'s `count_reliable`.
+                count_reliable = assistant_msgs > 0
+                await self._settle(sid, baseline + assistant_msgs, count_reliable=count_reliable)
                 await self._archive(sid)
         except BaseException:
             # Never leave a poisoned, non-None, un-entered client around: if

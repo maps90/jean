@@ -207,8 +207,12 @@ async def run() -> None:
     # `npx` cannot stall the liveness probe into killing the pod, and *before*
     # Slack connects, so no thread starts against a server that is still coming up.
     mcp_clients = await start_clients(stdio_servers(extra_mcp, plugins))
+    # Read the plugins' http servers BEFORE the takeover renames the files they are
+    # declared in. `remote_servers` can still read a renamed config (_mcp_json looks
+    # for both names), but depending on that would be a trap for the next reader.
+    remote = remote_servers(extra_mcp, plugins)
     take_over_plugin_mcp(plugins)
-    mcp_servers = {**build_proxy_servers(mcp_clients), **remote_servers(extra_mcp)}
+    mcp_servers = {**build_proxy_servers(mcp_clients), **remote}
 
     def options_factory_for(channel: str, thread_ts: str) -> OptionsFactory:
         # Bound per session: the permission hook waits on a human for up to

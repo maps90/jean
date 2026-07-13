@@ -7,6 +7,7 @@ equivalent.
 from __future__ import annotations
 
 import asyncio
+import time
 
 
 async def assert_session_roundtrip_and_engagement(store) -> None:
@@ -126,11 +127,10 @@ async def assert_coordinator_stores_approvers_and_pending(coordinator) -> None:
 
 
 async def assert_prune_removes_resolved_approvals_and_stale_sessions(store) -> None:
-    """prune(older_than) deletes resolved approvals and sessions last active
-    before the cutoff, leaving pending approvals untouched. `older_than` is an
-    absolute epoch cutoff -- a row is stale iff its timestamp is < cutoff."""
-    import time
-
+    """prune(sessions_older_than=, approvals_older_than=) deletes resolved
+    approvals and sessions last active before their respective cutoffs,
+    leaving pending approvals untouched. Each cutoff is an absolute epoch
+    value -- a row is stale iff its timestamp is < cutoff."""
     # A resolved approval and a touched session both timestamped ~now.
     await store.create("appr-old", "C1", "1.0", "old work")
     await store.resolve("appr-old", True, "U1")
@@ -138,8 +138,10 @@ async def assert_prune_removes_resolved_approvals_and_stale_sessions(store) -> N
     # A still-pending approval -- must never be pruned regardless of age.
     await store.create("appr-pending", "C2", "2.0", "awaiting a human")
 
-    # A cutoff in the far future makes every timestamped row look stale.
-    result = await store.prune(older_than=time.time() + 1000)
+    # Cutoffs in the far future make every timestamped row look stale.
+    result = await store.prune(
+        sessions_older_than=time.time() + 1000, approvals_older_than=time.time() + 1000
+    )
     assert result.approvals_deleted == 1
     assert result.sessions_deleted == 1
     # Resolved approval + stale session gone; pending approval survives.
@@ -149,14 +151,14 @@ async def assert_prune_removes_resolved_approvals_and_stale_sessions(store) -> N
 
 
 async def assert_prune_keeps_recent_rows(store) -> None:
-    """A cutoff in the past deletes nothing -- recent rows survive."""
-    import time
-
+    """Cutoffs in the past delete nothing -- recent rows survive."""
     await store.create("appr-fresh", "C1", "1.0", "fresh work")
     await store.resolve("appr-fresh", True, "U1")
     await store.upsert_session("C1", "1.0", sdk_session_id="sdk-fresh")
 
-    result = await store.prune(older_than=time.time() - 1000)
+    result = await store.prune(
+        sessions_older_than=time.time() - 1000, approvals_older_than=time.time() - 1000
+    )
     assert result.approvals_deleted == 0
     assert result.sessions_deleted == 0
     assert await store.get_pending("appr-fresh") == ("C1", "1.0", "fresh work")
@@ -172,3 +174,74 @@ async def assert_try_claim_cleanup_gates_on_interval(store) -> None:
     assert await store.try_claim_cleanup(min_interval=1000) is False
     # A zero interval is always due, so the next claim succeeds.
     assert await store.try_claim_cleanup(min_interval=0) is True
+
+
+async def assert_turn_seq_increments(store) -> None:
+    channel, thread_ts = "C-seq", "900.1"
+    await store.upsert_session(channel, thread_ts, sdk_session_id="sdk-1")
+    assert (await store.get_session(channel, thread_ts)).turn_seq == 0
+
+    assert await store.bump_turn(channel, thread_ts) == 1
+    assert await store.bump_turn(channel, thread_ts) == 2
+    assert (await store.get_session(channel, thread_ts)).turn_seq == 2
+
+
+async def assert_transcript_roundtrip(store) -> None:
+    channel, thread_ts = "C-tr", "901.1"
+    await store.upsert_session(channel, thread_ts, sdk_session_id="sid-a")
+
+    assert await store.load(channel, thread_ts, "sid-a") is None
+
+    blob = b'{"type":"user","sessionId":"sid-a"}\n' * 50
+    await store.save(channel, thread_ts, "sid-a", blob)
+    assert await store.load(channel, thread_ts, "sid-a") == blob
+
+    # A transcript stored under a different session id must never be handed back:
+    # resuming with the wrong transcript would corrupt the thread's memory.
+    assert await store.load(channel, thread_ts, "sid-b") is None
+
+    # The newest turn's transcript replaces the previous one.
+    bigger = blob + b'{"type":"assistant"}\n'
+    await store.save(channel, thread_ts, "sid-a", bigger)
+    assert await store.load(channel, thread_ts, "sid-a") == bigger
+
+
+async def assert_prune_uses_separate_windows_and_drops_transcripts(store) -> None:
+    now = time.time()
+    old, recent = now - 10 * 86400, now - 1 * 86400
+
+    # A session idle 10 days, with a transcript.
+    await store.upsert_session("C-old", "1.0", sdk_session_id="sid-old")
+    await store.save("C-old", "1.0", "sid-old", b"stale bytes")
+    # A session idle 1 day.
+    await store.upsert_session("C-new", "2.0", sdk_session_id="sid-new")
+
+    await _backdate_session(store, "C-old", "1.0", old)
+    await _backdate_session(store, "C-new", "2.0", recent)
+
+    # Sessions expire at 3 days; approvals at 30. The 10-day session goes; the
+    # 1-day one stays. A single shared window could not express this.
+    result = await store.prune(
+        sessions_older_than=now - 3 * 86400,
+        approvals_older_than=now - 30 * 86400,
+    )
+
+    assert result.sessions_deleted == 1
+    assert await store.get_session("C-old", "1.0") is None
+    assert await store.get_session("C-new", "2.0") is not None
+    # the transcript went with its session row
+    assert await store.load("C-old", "1.0", "sid-old") is None
+
+
+async def _backdate_session(store, channel: str, thread_ts: str, when: float) -> None:
+    """Force a session's last_active_at into the past. Both adapters store it as
+    an epoch float, but only through their own writes -- so reach in per adapter."""
+    if hasattr(store, "_sessions"):  # MemoryStore
+        store._sessions[(channel, thread_ts)].last_active_at = when
+    else:  # PostgresStore
+        await store._pool.execute(
+            "UPDATE sessions SET last_active_at=$3 WHERE channel=$1 AND thread_ts=$2",
+            channel,
+            thread_ts,
+            when,
+        )

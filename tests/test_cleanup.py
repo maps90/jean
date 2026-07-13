@@ -10,14 +10,16 @@ class FakeStore:
     def __init__(self, *, claim: bool) -> None:
         self._claim = claim
         self.claim_calls: list[float] = []
-        self.prune_cutoffs: list[float] = []
+        self.prune_cutoffs: list[tuple[float, float]] = []
 
     async def try_claim_cleanup(self, min_interval: float) -> bool:
         self.claim_calls.append(min_interval)
         return self._claim
 
-    async def prune(self, older_than: float) -> PruneResult:
-        self.prune_cutoffs.append(older_than)
+    async def prune(
+        self, *, sessions_older_than: float, approvals_older_than: float
+    ) -> PruneResult:
+        self.prune_cutoffs.append((sessions_older_than, approvals_older_than))
         return PruneResult(approvals_deleted=2, sessions_deleted=3)
 
 
@@ -34,7 +36,8 @@ async def test_run_once_prunes_at_cutoff_when_claim_won():
     result = await scheduler.run_once()
 
     assert store.claim_calls == [7 * 86400]
-    assert store.prune_cutoffs == [1_000_000.0 - 7 * 86400]
+    cutoff = 1_000_000.0 - 7 * 86400
+    assert store.prune_cutoffs == [(cutoff, cutoff)]
     assert result == PruneResult(approvals_deleted=2, sessions_deleted=3)
 
 

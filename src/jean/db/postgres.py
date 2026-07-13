@@ -208,16 +208,20 @@ class PostgresStore:
         return True
 
     # ---- MaintenanceStore ----  weekly retention cleanup
-    async def prune(self, older_than: float) -> PruneResult:
+    async def prune(
+        self, *, sessions_older_than: float, approvals_older_than: float
+    ) -> PruneResult:
         # One transaction so the two deletes commit together. Resolved
         # approvals carry resolved_at; pending rows have it NULL and are never
         # matched (NULL < cutoff is NULL) -- mirrors MemoryStore exactly.
         async with self._pool.acquire() as c, c.transaction():
             appr = await c.execute(
                 "DELETE FROM approvals WHERE resolved_at IS NOT NULL AND resolved_at < $1",
-                older_than,
+                approvals_older_than,
             )
-            sess = await c.execute("DELETE FROM sessions WHERE last_active_at < $1", older_than)
+            sess = await c.execute(
+                "DELETE FROM sessions WHERE last_active_at < $1", sessions_older_than
+            )
         # asyncpg returns a command tag like "DELETE 3"; the count is the tail.
         return PruneResult(
             approvals_deleted=int(appr.split()[-1]),

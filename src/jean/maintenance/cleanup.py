@@ -42,7 +42,7 @@ class CleanupScheduler:
         if not await self._store.try_claim_cleanup(self._interval_seconds):
             return None
         cutoff = self._clock() - self._retention_seconds
-        result = await self._store.prune(cutoff)
+        result = await self._store.prune(sessions_older_than=cutoff, approvals_older_than=cutoff)
         logger.info(
             "retention cleanup pruned %d approvals, %d sessions (older than %.0fs)",
             result.approvals_deleted,

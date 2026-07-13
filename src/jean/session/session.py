@@ -69,6 +69,16 @@ class JeanSession:
         self._seen_seq: int = 0  # turn_seq this instance's client is current with
         self._sid: str | None = None  # session id its transcript is stored under
         self._archived = False  # is the store's copy up to date with local disk?
+        self._busy = False  # is a turn in flight? (the idle sweeper must not close us)
+
+    @property
+    def busy(self) -> bool:
+        """True while a turn is in flight. The idle sweeper reads this: closing a
+        session mid-turn tears down the client and deletes the .jsonl the CLI child
+        still has open, so the turn would archive nothing and the thread would
+        rewind. A turn parked on a human approval outlives the idle window
+        (approval_ttl 30min > idle_minutes 15), so "idle" is not "not running"."""
+        return self._busy
 
     async def _open(self, resume: str | None) -> Any:
         options = self._options_factory(resume)
@@ -139,22 +149,23 @@ class JeanSession:
             and self._seen_seq == committed_seq
             and self._local.path(resume).exists()
         )
-        hydrated = False
         if not local_is_newer:
             data = await self._transcripts.load(self._channel, self._thread_ts, resume)
             if data is not None:
                 self._local.write(resume, data)
-                hydrated = True
         try:
             return await self._open(resume)
         except Exception:
-            # The resume was refused, so the file we just materialized for it is
-            # useless -- and it is the store's copy, not ours, so dropping it
-            # loses nothing. Leave a file we did NOT write alone: it would be the
-            # only copy of an un-archived transcript.
-            if hydrated:
-                self._local.delete(resume)
             client = await self._open(None)
+            # Only now do we know the resume id itself was refused: a failure that
+            # was never about the resume (bad auth, bad --plugin-dir) would have
+            # failed here too and propagated, leaving the file untouched. So the
+            # file for THAT id is dead weight -- this turn gets a new session id
+            # and nothing will ever reference the old one again. Delete it whether
+            # we hydrated it from the store or it was our own un-archived copy;
+            # the CLI has told us that copy cannot be resumed, and leaving it
+            # orphans it on this pod's disk forever.
+            self._local.delete(resume)
         await self._chat.reply(
             self._channel,
             self._thread_ts,
@@ -168,14 +179,24 @@ class JeanSession:
 
         `_archived` means "the store's copy is up to date with our local file for
         `_sid`", and close() reads it to decide whether deleting that local file is
-        safe. So it must be cleared here, up front, before any path that returns
-        without a successful save(): otherwise a `True` left over from an earlier
-        turn's archive outlives the turn it described, and close() deletes a file
-        the store never took -- rewinding the thread to the last archived turn.
+        safe. It is NOT cleared here -- run_turn clears it before query(), which is
+        the moment it actually stops being true (see there). Every path out of this
+        method that does not reach a successful save() therefore leaves it False.
         """
-        self._sid, self._archived = sdk_session_id, False
+        self._sid = sdk_session_id
         data = self._local.read(sdk_session_id)
         if data is None:
+            # The CLI wrote its transcript somewhere we are not looking: a cli_home
+            # or cwd that does not match the CLI's real project dir turns this whole
+            # mechanism into a silent no-op (nothing archived, every cold worker
+            # starts fresh). This log line is the only signal that would catch it.
+            logger.warning(
+                "no transcript at %s for %s/%s -- nothing to archive; this thread "
+                "will not resume on another worker (is cli_home/cwd correct?)",
+                self._local.path(sdk_session_id),
+                self._channel,
+                self._thread_ts,
+            )
             return
         if len(data) > self._max_transcript_bytes:
             logger.warning(
@@ -201,6 +222,7 @@ class JeanSession:
     async def run_turn(self, text: str) -> None:
         self._routing.channel = self._channel
         self._routing.thread_ts = self._thread_ts
+        self._busy = True
         await self._chat.set_status(self._channel, self._thread_ts, "is thinking...")
         try:
             if self._client is not None:
@@ -216,6 +238,17 @@ class JeanSession:
                 self._client = await self._connect()
 
             sid: str | None = None
+            # Clear `_archived` HERE, not in _archive(): the flag means "the store's
+            # copy is up to date with our local file", and query() is the exact
+            # moment that stops being true -- the CLI child appends this turn to the
+            # local .jsonl while it answers. Clearing it only in _archive() would
+            # leave a `True` from the PREVIOUS turn standing over an already-newer
+            # local file for the whole turn, so any failure in between (a dropped
+            # connection in bump_turn, say) would let close() delete the only copy
+            # of a turn the user has already seen. A turn that fails BEFORE the CLI
+            # writes anything merely leaves the flag False over a local file that is
+            # still identical to the store's -- harmless: we re-archive next turn.
+            self._archived = False
             await self._client.query(text)
             async for msg in self._client.receive_response():
                 got = getattr(msg, "session_id", None)
@@ -260,12 +293,19 @@ class JeanSession:
                 self._client = None
             raise
         finally:
+            self._busy = False
             # "" clears the assistant thread status (see slack/client.py).
             await self._chat.set_status(self._channel, self._thread_ts, "")
 
     async def close(self) -> None:
         if self._client is not None:
-            await self._client.__aexit__(None, None, None)
+            # We are DISCARDING this client (idle sweep, or run_turn's staleness
+            # branch mid-turn), so a failing teardown has nothing left to protect:
+            # letting it escape would leave `_client` non-None -- poisoning every
+            # later turn -- and, on the staleness path, fail the user's turn because
+            # tearing down a client we no longer wanted went wrong.
+            with contextlib.suppress(Exception):
+                await self._client.__aexit__(None, None, None)
             self._client = None
         # Postgres is the durable copy, so a pod need not hoard transcripts for
         # threads it is no longer serving -- but never delete one the store failed

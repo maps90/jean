@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+import pytest
 from claude_agent_sdk import ProcessError
 
 from jean.db.memory import MemoryStore
@@ -483,12 +484,15 @@ class FlakyTranscripts:
         self._inner = inner
         self.calls: list[str] = []
         self.fail_save = False
+        self.fail_bump = False
 
     def __getattr__(self, name):  # get_session / upsert_session / ... pass through
         return getattr(self._inner, name)
 
     async def bump_turn(self, channel: str, thread_ts: str) -> int:
         self.calls.append("bump_turn")
+        if self.fail_bump:
+            raise RuntimeError("connection reset")
         return await self._inner.bump_turn(channel, thread_ts)
 
     async def save(self, channel: str, thread_ts: str, sdk_session_id: str, data: bytes) -> None:
@@ -679,3 +683,112 @@ async def test_unarchived_local_transcript_loses_to_a_turn_another_worker_commit
         == b'{"turn":2,"by":"b"}\n{"turn":3,"by":"a"}\n'
     )
     assert chat.replies == []  # the resume worked; no "I lost my memory" note
+
+
+async def test_turn_that_fails_after_the_cli_wrote_keeps_the_local_transcript(tmp_path: Path):
+    """The store's copy stops being up to date the moment the CLI child writes, not
+    when _archive runs -- so `_archived` must be cleared before query(). Otherwise a
+    turn that fails in between (here: bump_turn on a dropped connection) leaves a
+    `True` left over from the PREVIOUS turn, and close() deletes the only copy of
+    the turn that just ran."""
+    FakeSdkClient.instances.clear()
+    inner = MemoryStore()
+    store = FlakyTranscripts(inner)
+    chat = FakeChat()
+    local = LocalTranscripts(cli_home=tmp_path, cwd=Path("/w"))
+    content: dict[str, bytes | None] = {"data": b'{"turn":1}\n'}
+    factory, _calls = _writing_client_factory(local, content)
+
+    session = _session(store, chat, factory, local)
+
+    await session.run_turn("hello")  # turn 1 archives cleanly -> _archived True
+    assert await store.load("C1", "111.0", "sdk-session-abc") == b'{"turn":1}\n'
+
+    # turn 2: the CLI writes its line and the user gets their answer, then the
+    # store write fails -- the turn raises before _archive is ever reached.
+    store.fail_bump = True
+    content["data"] = b'{"turn":1}\n{"turn":2}\n'
+    with pytest.raises(RuntimeError):
+        await session.run_turn("again")
+
+    assert await store.load("C1", "111.0", "sdk-session-abc") == b'{"turn":1}\n'  # store is behind
+
+    await session.close()
+
+    # the local file is the ONLY copy of turn 2 -- close() must not delete it
+    assert local.read("sdk-session-abc") == b'{"turn":1}\n{"turn":2}\n'
+
+
+async def test_stale_local_transcript_is_deleted_when_the_resume_is_refused(tmp_path: Path):
+    """When hydration is SKIPPED (our local file was the newer un-archived copy) and
+    the resume is then refused, the turn gets a NEW session id -- nothing will ever
+    reference the old one again, so its file must not be orphaned on disk."""
+    FakeSdkClient.instances.clear()
+    inner = MemoryStore()
+    store = FlakyTranscripts(inner)
+    chat = FakeChat()
+    local = LocalTranscripts(cli_home=tmp_path, cwd=Path("/w"))
+    content: dict[str, bytes | None] = {"data": b'{"turn":1}\n'}
+    factory, _calls = _writing_client_factory(local, content)
+
+    session = _session(store, chat, factory, local)
+
+    store.fail_save = True
+    await session.run_turn("hello")  # archive fails -> our local file is un-archived
+    assert await inner.load("C1", "111.0", "sdk-session-abc") is None
+    assert local.read("sdk-session-abc") == b'{"turn":1}\n'
+    await session.close()  # keeps the un-archived file, drops the client
+
+    class ResumeRejectingClient(FakeSdkClient):
+        async def __aenter__(self):
+            if self.options["resume"] is not None:
+                raise ProcessError("Command failed with exit code 1", exit_code=1)
+            return await super().__aenter__()
+
+        async def receive_response(self):
+            yield FakeResultMessage(session_id="sdk-session-new")
+
+    session._client_factory = lambda *, options: ResumeRejectingClient(options=options)
+    store.fail_save = False
+
+    await session.run_turn("again")  # the CLI refuses the resume -> fresh session
+
+    assert (await inner.get_session("C1", "111.0")).sdk_session_id == "sdk-session-new"
+    # the refused id's transcript is dead weight: no id references it any more
+    assert local.path("sdk-session-abc").exists() is False
+
+
+async def test_close_survives_a_client_whose_teardown_raises(tmp_path: Path):
+    """run_turn's staleness branch calls close() mid-turn, so close() is on the hot
+    path: a client we are DISCARDING whose __aexit__ raises must not fail the user's
+    turn, nor be left behind in _client."""
+    FakeSdkClient.instances.clear()
+    store, chat = MemoryStore(), FakeChat()
+    local = LocalTranscripts(cli_home=tmp_path, cwd=Path("/w"))
+
+    class ExitFailingClient(FakeSdkClient):
+        async def __aexit__(self, *exc_info):
+            await super().__aexit__(*exc_info)
+            raise RuntimeError("teardown blew up")
+
+    calls: list[dict] = []
+
+    def factory(*, options):
+        calls.append({"options": options})
+        return ExitFailingClient(options=options)
+
+    session = _session(store, chat, factory, local)
+    await session.run_turn("hello")
+
+    # another worker advances the thread: our cached client is stale, so the next
+    # turn tears it down mid-turn -- and its teardown blows up.
+    await store.bump_turn("C1", "111.0")
+
+    await session.run_turn("again")  # must not raise
+
+    assert len(calls) == 2, "the stale client must be replaced, not reused"
+    assert calls[1]["options"] == {"resume": "sdk-session-abc"}
+    assert FakeSdkClient.instances[-1].queried == ["again"]
+
+    await session.close()
+    assert session._client is None  # dropped even though __aexit__ raised

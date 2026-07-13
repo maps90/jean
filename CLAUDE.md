@@ -138,11 +138,15 @@ default_headers={"anthropic-beta": "oauth-2025-04-20"})` or the API returns 401.
 ### One feature at a time, in its own worktree
 
 - **Every new feature or bugfix starts in a git worktree**, never directly in the primary
-  checkout. Create it before the first edit:
-  `git worktree add ../jean-<slug> -b <slug>` (branch off `main`), then work there.
-  When the branch is merged or abandoned, remove it: `git worktree remove ../jean-<slug>`.
+  checkout. Create it before the first edit, **under `.claude/worktrees/`** — not as a
+  sibling of the repo: `git worktree add .claude/worktrees/<slug> -b <slug>` (branch off
+  `main`), then work there. When the branch is merged or abandoned, remove it:
+  `git worktree remove .claude/worktrees/<slug>`.
   The primary checkout stays on a clean `main` so a review, a hotfix, or a `kubectl`-adjacent
   debug session never collides with in-progress work.
+  Keeping them inside `.claude/worktrees/` means every worktree is in one predictable place
+  the tooling already knows about, and `git worktree list` reads as an inventory of work in
+  flight rather than a scatter of `../jean-*` directories nobody prunes.
 - **No parallel work.** Do one task at a time, start to finish, before picking up the next.
   Do not fan out subagents to edit code concurrently, do not run multiple features in flight,
   and do not split a plan across parallel agents — sequential execution only. Read-only

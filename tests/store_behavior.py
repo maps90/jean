@@ -9,6 +9,8 @@ from __future__ import annotations
 import asyncio
 import time
 
+import pytest
+
 
 async def assert_session_roundtrip_and_engagement(store) -> None:
     channel, thread_ts = "C1", "111.222"
@@ -250,6 +252,24 @@ async def assert_bump_turn_on_a_new_thread_is_not_born_expired(store) -> None:
     )
     assert result.sessions_deleted == 0
     assert await store.get_session(channel, thread_ts) is not None
+
+
+async def assert_save_requires_an_existing_session(store) -> None:
+    """save() must mirror the Postgres FK: a transcript cannot exist without
+    its session row. The two adapters raise different exception TYPES --
+    Postgres raises asyncpg's ForeignKeyViolationError, MemoryStore raises a
+    built-in -- so this only pins the *behavior* (save() raises for an
+    unknown thread), not the type. After upsert_session(...), the same save()
+    call must succeed and round-trip normally."""
+    channel, thread_ts = "C-fk", "902.1"
+    assert await store.get_session(channel, thread_ts) is None
+
+    with pytest.raises(Exception):  # noqa: B017 -- type intentionally unpinned, see docstring
+        await store.save(channel, thread_ts, "sid-fk", b"payload")
+
+    await store.upsert_session(channel, thread_ts, sdk_session_id="sid-fk")
+    await store.save(channel, thread_ts, "sid-fk", b"payload")
+    assert await store.load(channel, thread_ts, "sid-fk") == b"payload"
 
 
 async def _backdate_session(store, channel: str, thread_ts: str, when: float) -> None:

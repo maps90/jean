@@ -20,6 +20,7 @@ from tests.store_behavior import (  # noqa: E402
     assert_prune_keeps_recent_rows,
     assert_prune_removes_resolved_approvals_and_stale_sessions,
     assert_prune_uses_separate_windows_and_drops_transcripts,
+    assert_save_requires_an_existing_session,
     assert_session_roundtrip_and_engagement,
     assert_thread_lock_allows_different_threads,
     assert_thread_lock_serializes_same_thread,
@@ -105,6 +106,10 @@ async def test_prune_uses_separate_windows_and_drops_transcripts(store):
 
 async def test_bump_turn_on_a_new_thread_is_not_born_expired(store):
     await assert_bump_turn_on_a_new_thread_is_not_born_expired(store)
+
+
+async def test_save_requires_an_existing_session(store):
+    await assert_save_requires_an_existing_session(store)
 
 
 async def test_transcript_is_compressed_at_rest(store):

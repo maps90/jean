@@ -5,7 +5,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from jean.ports import ChatSurface, SessionStore
+from jean.ports import ChatSurface, SessionRow, SessionStore
 
 
 @dataclass
@@ -37,7 +37,7 @@ class JeanSession:
         store: SessionStore,
         chat: ChatSurface,
         routing: RoutingContext,
-        options_factory: Callable[[str | None], Any],
+        options_factory: Callable[[str | None, str | None], Any],
         client_factory: Callable[..., Any],
     ) -> None:
         self._channel = channel
@@ -48,9 +48,12 @@ class JeanSession:
         self._options_factory = options_factory
         self._client_factory = client_factory
         self._client: Any | None = None
+        # The permission mode the cached client was opened with; the SDK fixes
+        # it at connect, so a later /mode only lands on a fresh client.
+        self._mode: str | None = None
 
-    async def _open(self, resume: str | None) -> Any:
-        options = self._options_factory(resume)
+    async def _open(self, resume: str | None, permission_mode: str | None) -> Any:
+        options = self._options_factory(resume, permission_mode)
         client = self._client_factory(options=options)
         try:
             await client.__aenter__()
@@ -58,9 +61,10 @@ class JeanSession:
             with contextlib.suppress(Exception):
                 await client.__aexit__(None, None, None)
             raise
+        self._mode = permission_mode
         return client
 
-    async def _connect(self) -> Any:
+    async def _connect(self, row: SessionRow | None) -> Any:
         """Connect a client, resuming the stored sdk_session_id when there is one.
 
         The stored id can outlive the transcript it names: the CLI writes each
@@ -78,14 +82,14 @@ class JeanSession:
         too, it was never the resume -- propagate, and leave the stored id
         alone.
         """
-        row = await self._store.get_session(self._channel, self._thread_ts)
         resume = row.sdk_session_id if row else None
+        mode = row.permission_mode if row else None
         if resume is None:
-            return await self._open(None)
+            return await self._open(None, mode)
         try:
-            return await self._open(resume)
+            return await self._open(resume, mode)
         except Exception:
-            client = await self._open(None)
+            client = await self._open(None, mode)
         await self._chat.reply(
             self._channel,
             self._thread_ts,
@@ -99,8 +103,16 @@ class JeanSession:
         self._routing.thread_ts = self._thread_ts
         await self._chat.set_status(self._channel, self._thread_ts, "is thinking...")
         try:
+            row = await self._store.get_session(self._channel, self._thread_ts)
+            # `/mode` may have run since this client was opened -- on this worker
+            # or, in the stateless-worker model, on any other one. permission_mode
+            # is baked into the client at connect, so honour a change by dropping
+            # the cached client; the reconnect below resumes the same sdk session.
+            if self._client is not None and (row.permission_mode if row else None) != self._mode:
+                with contextlib.suppress(Exception):
+                    await self.close()
             if self._client is None:
-                self._client = await self._connect()
+                self._client = await self._connect(row)
 
             await self._client.query(text)
             async for msg in self._client.receive_response():

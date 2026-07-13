@@ -27,7 +27,9 @@ def test_defaults_resolve(clean_env):
     assert settings.slack_app_token == "xapp-test"
     assert settings.idle_minutes == 15
     assert settings.approval_ttl == 1800
-    assert settings.permission_mode == "bypassPermissions"
+    # Not "bypassPermissions": that mode skips the CLI's permission system, so
+    # the can_use_tool hook -- jean's Slack Approve/Deny buttons -- never fires.
+    assert settings.permission_mode == "default"
     assert settings.health_port == 8080
     assert settings.soul_parse_model == "claude-haiku-4-5-20251001"
     assert settings.database_url == "postgresql://jean:jean@localhost:5432/jean"
@@ -86,6 +88,23 @@ def test_external_paths_override(clean_env):
     assert settings.plugins_path == Path("/etc/jean/jean.json")
     assert settings.mcp_config_path == Path("/etc/jean/mcp.json")
     assert settings.marketplace_token == "ghp_abc"
+
+
+def test_approvers_default_empty(clean_env):
+    assert Settings.load().approvers == ()
+
+
+def test_approvers_parsed_from_comma_separated_env(clean_env):
+    """The ops-level backstop: an approver set that does not depend on the LLM
+    extracting IDENTITY.md correctly."""
+    clean_env.setenv("JEAN_APPROVERS", "U11111, U22222")
+    assert Settings.load().approvers == ("U11111", "U22222")
+
+
+def test_approvers_rejects_a_non_slack_id(clean_env):
+    clean_env.setenv("JEAN_APPROVERS", "not-a-slack-id")
+    with pytest.raises(ValueError):
+        Settings.load()
 
 
 def test_db_pool_defaults_are_modest(clean_env):

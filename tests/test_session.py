@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 from claude_agent_sdk import ProcessError
 
 from jean.db.memory import MemoryStore
 from jean.session.session import JeanSession, RoutingContext
+from jean.session.transcript import LocalTranscripts
 
 
 @dataclass
@@ -75,7 +77,7 @@ def _client_factory():
     return factory, calls
 
 
-async def test_run_turn_persists_session_id_and_sets_status():
+async def test_run_turn_persists_session_id_and_sets_status(tmp_path: Path):
     FakeSdkClient.instances.clear()
     store = MemoryStore()
     chat = FakeChat()
@@ -90,6 +92,8 @@ async def test_run_turn_persists_session_id_and_sets_status():
         routing=routing,
         options_factory=lambda resume: {"resume": resume},
         client_factory=factory,
+        transcripts=store,
+        local=LocalTranscripts(cli_home=tmp_path, cwd=Path("/w")),
     )
 
     await session.run_turn("hello")
@@ -102,7 +106,7 @@ async def test_run_turn_persists_session_id_and_sets_status():
     assert ("C1", "111.0", "is thinking...") in chat.statuses
 
 
-async def test_run_turn_reuses_the_connected_client_across_turns():
+async def test_run_turn_reuses_the_connected_client_across_turns(tmp_path: Path):
     FakeSdkClient.instances.clear()
     store = MemoryStore()
     chat = FakeChat()
@@ -117,6 +121,8 @@ async def test_run_turn_reuses_the_connected_client_across_turns():
         routing=routing,
         options_factory=lambda resume: {"resume": resume},
         client_factory=factory,
+        transcripts=store,
+        local=LocalTranscripts(cli_home=tmp_path, cwd=Path("/w")),
     )
 
     await session.run_turn("hello")
@@ -126,13 +132,14 @@ async def test_run_turn_reuses_the_connected_client_across_turns():
     assert FakeSdkClient.instances[0].queried == ["hello", "again"]
 
 
-async def test_second_turn_on_a_fresh_session_resumes_stored_id():
+async def test_second_turn_on_a_fresh_session_resumes_stored_id(tmp_path: Path):
     """Simulates a different worker (or a rebuilt cache entry) picking up the
     same thread: resume must come from the store, not from any in-process
     state."""
     FakeSdkClient.instances.clear()
     store = MemoryStore()
     chat = FakeChat()
+    local = LocalTranscripts(cli_home=tmp_path, cwd=Path("/w"))
 
     routing1 = RoutingContext()
     factory1, calls1 = _client_factory()
@@ -144,6 +151,8 @@ async def test_second_turn_on_a_fresh_session_resumes_stored_id():
         routing=routing1,
         options_factory=lambda resume: {"resume": resume},
         client_factory=factory1,
+        transcripts=store,
+        local=local,
     )
     await session1.run_turn("hello")
     assert calls1[0]["options"] == {"resume": None}
@@ -158,12 +167,14 @@ async def test_second_turn_on_a_fresh_session_resumes_stored_id():
         routing=routing2,
         options_factory=lambda resume: {"resume": resume},
         client_factory=factory2,
+        transcripts=store,
+        local=local,
     )
     await session2.run_turn("continue")
     assert calls2[0]["options"] == {"resume": "sdk-session-abc"}
 
 
-async def test_failed_turn_resets_client_to_none_and_next_turn_rebuilds():
+async def test_failed_turn_resets_client_to_none_and_next_turn_rebuilds(tmp_path: Path):
     """I3: a client whose first turn raises must not be left poisoned
     (non-None and un-entered) -- the next run_turn should rebuild a fresh
     client and resume from the stored sdk_session_id."""
@@ -191,6 +202,8 @@ async def test_failed_turn_resets_client_to_none_and_next_turn_rebuilds():
         routing=routing,
         options_factory=lambda resume: {"resume": resume},
         client_factory=factory,
+        transcripts=store,
+        local=LocalTranscripts(cli_home=tmp_path, cwd=Path("/w")),
     )
 
     try:
@@ -217,7 +230,7 @@ async def test_failed_turn_resets_client_to_none_and_next_turn_rebuilds():
     assert session._client is not None
 
 
-async def test_close_disconnects_the_client():
+async def test_close_disconnects_the_client(tmp_path: Path):
     FakeSdkClient.instances.clear()
     store = MemoryStore()
     chat = FakeChat()
@@ -232,6 +245,8 @@ async def test_close_disconnects_the_client():
         routing=routing,
         options_factory=lambda resume: {"resume": resume},
         client_factory=factory,
+        transcripts=store,
+        local=LocalTranscripts(cli_home=tmp_path, cwd=Path("/w")),
     )
     await session.run_turn("hello")
     await session.close()
@@ -239,7 +254,7 @@ async def test_close_disconnects_the_client():
     assert FakeSdkClient.instances[0].exited is True
 
 
-async def test_stale_resume_falls_back_to_a_fresh_session():
+async def test_stale_resume_falls_back_to_a_fresh_session(tmp_path: Path):
     """The claude CLI keeps each conversation's transcript on the local
     filesystem while jean persists only the id in Postgres, so a restarted pod
     (or a second replica) resumes an id whose transcript it cannot see and the
@@ -273,6 +288,8 @@ async def test_stale_resume_falls_back_to_a_fresh_session():
         routing=routing,
         options_factory=lambda resume: {"resume": resume},
         client_factory=factory,
+        transcripts=store,
+        local=LocalTranscripts(cli_home=tmp_path, cwd=Path("/w")),
     )
 
     await session.run_turn("hello")
@@ -287,7 +304,7 @@ async def test_stale_resume_falls_back_to_a_fresh_session():
     assert "fresh" in chat.replies[0][2].lower()
 
 
-async def test_connect_failure_unrelated_to_resume_propagates():
+async def test_connect_failure_unrelated_to_resume_propagates(tmp_path: Path):
     """A startup failure that is NOT about the resume id (a bad --plugin-dir,
     bad auth) also exits 1. Reconnecting without `resume` fails identically, so
     jean must surface the error rather than pretend the thread lost its memory
@@ -316,6 +333,8 @@ async def test_connect_failure_unrelated_to_resume_propagates():
         routing=routing,
         options_factory=lambda resume: {"resume": resume},
         client_factory=factory,
+        transcripts=store,
+        local=LocalTranscripts(cli_home=tmp_path, cwd=Path("/w")),
     )
 
     try:
@@ -329,3 +348,127 @@ async def test_connect_failure_unrelated_to_resume_propagates():
     row = await store.get_session("C1", "111.0")
     assert row.sdk_session_id == "perfectly-good-id"  # untouched
     assert chat.replies == []  # no bogus "I lost my memory" note
+
+
+def _session(store, chat, factory, local, **kw):
+    return JeanSession(
+        "C1",
+        "111.0",
+        store=store,
+        chat=chat,
+        routing=RoutingContext(),
+        options_factory=lambda resume: {"resume": resume},
+        client_factory=factory,
+        transcripts=store,
+        local=local,
+        **kw,
+    )
+
+
+async def test_turn_archives_the_transcript_to_the_store(tmp_path: Path):
+    FakeSdkClient.instances.clear()
+    store, chat = MemoryStore(), FakeChat()
+    local = LocalTranscripts(cli_home=tmp_path, cwd=Path("/w"))
+    factory, _calls = _client_factory()
+
+    session = _session(store, chat, factory, local)
+
+    # stand in for the CLI child writing its transcript during the turn
+    class WritingClient(FakeSdkClient):
+        async def query(self, text: str) -> None:
+            await super().query(text)
+            local.write("sdk-session-abc", b'{"type":"user"}\n')
+
+    session._client_factory = lambda *, options: WritingClient(options=options)
+    await session.run_turn("hello")
+
+    assert await store.load("C1", "111.0", "sdk-session-abc") == b'{"type":"user"}\n'
+    assert (await store.get_session("C1", "111.0")).turn_seq == 1
+
+
+async def test_cold_worker_hydrates_the_transcript_before_resuming(tmp_path: Path):
+    """The whole point: a worker that has never seen this thread must materialize
+    the transcript from Postgres onto its own disk, or `resume` finds no file."""
+    FakeSdkClient.instances.clear()
+    store, chat = MemoryStore(), FakeChat()
+    local = LocalTranscripts(cli_home=tmp_path, cwd=Path("/w"))
+    await store.upsert_session("C1", "111.0", sdk_session_id="sdk-session-abc")
+    await store.save("C1", "111.0", "sdk-session-abc", b'{"type":"user"}\n')
+
+    factory, calls = _client_factory()
+    session = _session(store, chat, factory, local)
+
+    assert local.read("sdk-session-abc") is None  # cold disk
+
+    await session.run_turn("continue")
+
+    assert local.read("sdk-session-abc") == b'{"type":"user"}\n'  # hydrated
+    assert calls[0]["options"] == {"resume": "sdk-session-abc"}
+    assert chat.replies == []  # no "I lost my memory" note -- it didn't
+
+
+async def test_cached_client_is_dropped_when_another_worker_advanced_the_thread(
+    tmp_path: Path,
+):
+    """Two JeanSessions over one store = two workers on one thread. Worker A's
+    cached client skips _connect(), so without a turn_seq guard it would answer
+    from a history that never saw worker B's turn and overwrite B's transcript."""
+    FakeSdkClient.instances.clear()
+    store, chat = MemoryStore(), FakeChat()
+    local_a = LocalTranscripts(cli_home=tmp_path / "a", cwd=Path("/w"))
+    local_b = LocalTranscripts(cli_home=tmp_path / "b", cwd=Path("/w"))
+
+    factory_a, calls_a = _client_factory()
+    factory_b, _calls_b = _client_factory()
+    worker_a = _session(store, chat, factory_a, local_a)
+    worker_b = _session(store, chat, factory_b, local_b)
+
+    await worker_a.run_turn("first")
+    assert len(calls_a) == 1
+
+    await worker_b.run_turn("second")  # worker B advances the thread
+
+    await worker_a.run_turn("third")  # back to A, whose cached client is now stale
+
+    assert len(calls_a) == 2, "worker A must rebuild its client, not reuse the stale one"
+    assert calls_a[1]["options"] == {"resume": "sdk-session-abc"}
+
+
+async def test_local_transcript_is_kept_when_archiving_fails(tmp_path: Path):
+    """A DB outage must not destroy the only copy: close() deletes the pod's local
+    file only when the store definitely has it."""
+    FakeSdkClient.instances.clear()
+    store, chat = MemoryStore(), FakeChat()
+    local = LocalTranscripts(cli_home=tmp_path, cwd=Path("/w"))
+
+    class BrokenTranscripts:
+        async def save(self, *a, **k):
+            raise RuntimeError("db down")
+
+        async def load(self, *a, **k):
+            return None
+
+    factory, _calls = _client_factory()
+    session = JeanSession(
+        "C1",
+        "111.0",
+        store=store,
+        chat=chat,
+        routing=RoutingContext(),
+        options_factory=lambda resume: {"resume": resume},
+        client_factory=factory,
+        transcripts=BrokenTranscripts(),
+        local=local,
+    )
+
+    class WritingClient(FakeSdkClient):
+        async def query(self, text: str) -> None:
+            await super().query(text)
+            local.write("sdk-session-abc", b'{"type":"user"}\n')
+
+    session._client_factory = lambda *, options: WritingClient(options=options)
+
+    await session.run_turn("hello")  # the turn still succeeds; the user got an answer
+    await session.close()
+
+    assert local.read("sdk-session-abc") == b'{"type":"user"}\n'  # not deleted

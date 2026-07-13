@@ -55,7 +55,11 @@ Copy `.env.example` to `.env` and fill in:
 | `JEAN_DATABASE_URL` | yes (or rely on the compose default) | `postgresql://user:pass@host:5432/db` |
 | `JEAN_HOME` | no | defaults to `~/.jean` |
 | `JEAN_IDLE_MINUTES`, `JEAN_APPROVAL_TTL`, `JEAN_PERMISSION_MODE`, `JEAN_HEALTH_PORT`, `JEAN_MODEL`, `JEAN_SOUL_PARSE_MODEL` | no | see `.env.example` for defaults |
-| `JEAN_CLEANUP_ENABLED`, `JEAN_CLEANUP_RETENTION_DAYS` | no | weekly Postgres retention cleanup; prunes resolved approvals + idle sessions older than the window (default: enabled, 30 days). One worker prunes per week via an advisory lock. |
+| `JEAN_CLEANUP_ENABLED` | no | Postgres retention cleanup (default: `true`). One worker per cycle prunes, via an advisory lock. |
+| `JEAN_SESSION_RETENTION_DAYS` | no | delete sessions idle longer than this (default: `3`). The session's transcript cascades away with the row — **and so do `engaged` and `permission_mode`**, so a thread that has been quiet this long needs a fresh `@jean` mention to re-engage. |
+| `JEAN_APPROVAL_RETENTION_DAYS` | no | delete resolved approvals older than this (default: `30`) — the audit trail outlives the memory. Pending approvals are never pruned. |
+| `JEAN_CLEANUP_INTERVAL_HOURS` | no | how often the sweep runs (default: `24`) |
+| `JEAN_TRANSCRIPT_MAX_MB` | no | refuse to archive a transcript bigger than this (default: `32`), rather than let one pathological thread bloat the database. That thread keeps working, but only on the worker holding it — it won't resume elsewhere. |
 
 Exactly one of `ANTHROPIC_API_KEY` / `CLAUDE_CODE_OAUTH_TOKEN` must be set --
 these two are the only unprefixed env vars, everything else is `JEAN_*`.

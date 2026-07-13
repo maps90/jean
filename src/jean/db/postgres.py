@@ -43,7 +43,8 @@ ALTER TABLE transcripts ALTER COLUMN data SET STORAGE EXTERNAL;
 
 
 class PostgresStore:
-    """asyncpg implementation of SessionStore + ApprovalCoordinator + ThreadLock.
+    """asyncpg implementation of SessionStore + TranscriptStore + ApprovalCoordinator
+    + MaintenanceStore + ThreadLock.
 
     Must match MemoryStore's semantics exactly -- see tests/store_behavior.py
     for the shared assertions both adapters satisfy. Cross-worker approvals
@@ -145,7 +146,15 @@ class PostgresStore:
         )
 
     # ---- TranscriptStore ----  gzip is a storage detail; the port speaks raw bytes.
+    #
+    # gzip is CPU-bound and this is a single-threaded event loop shared by every
+    # thread on the worker (and the health server), so it runs on a thread via
+    # asyncio.to_thread -- at the 32 MB cap (JEAN_TRANSCRIPT_MAX_MB) compression
+    # takes ~0.7s, which on the loop would stall every other Slack thread's turn
+    # and the readiness probe with it. Level 6 rather than gzip's default 9: 9
+    # buys a few percent on already-repetitive JSONL for several times the CPU.
     async def save(self, channel: str, thread_ts: str, sdk_session_id: str, data: bytes) -> None:
+        blob = await asyncio.to_thread(gzip.compress, data, compresslevel=6)
         await self._pool.execute(
             """INSERT INTO transcripts(channel,thread_ts,sdk_session_id,data,raw_bytes,updated_at)
                VALUES($1,$2,$3,$4,$5,extract(epoch from now()))
@@ -155,7 +164,7 @@ class PostgresStore:
             channel,
             thread_ts,
             sdk_session_id,
-            gzip.compress(data),
+            blob,
             len(data),
         )
 
@@ -167,7 +176,7 @@ class PostgresStore:
         )
         if r is None or r["sdk_session_id"] != sdk_session_id:
             return None
-        return gzip.decompress(r["data"])
+        return await asyncio.to_thread(gzip.decompress, r["data"])
 
     # ---- ThreadLock ----  advisory *xact* lock auto-releases on tx end.
     # This is held for the ENTIRE agent turn (per-thread serialization across
@@ -265,7 +274,7 @@ class PostgresStore:
         await self._pool.execute("SELECT pg_notify('jean_approvals', $1)", approval_id)
         return True
 
-    # ---- MaintenanceStore ----  weekly retention cleanup
+    # ---- MaintenanceStore ----  retention cleanup, swept every cleanup_interval_hours
     async def prune(
         self, *, sessions_older_than: float, approvals_older_than: float
     ) -> PruneResult:

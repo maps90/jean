@@ -47,12 +47,15 @@ class SessionManager:
             # swept before it ever gets to answer another message.
             self._last_touch[key] = time.time()
 
+    def _is_idle(self, key: tuple[str, str], now: float) -> bool:
+        touched = self._last_touch.get(key)
+        return touched is not None and now - touched > self._idle_seconds
+
     async def sweep(self, now: float | None = None) -> None:
         now = time.time() if now is None else now
-        idle_keys = [
-            key for key, touched in self._last_touch.items() if now - touched > self._idle_seconds
-        ]
+        idle_keys = [key for key in list(self._last_touch) if self._is_idle(key, now)]
         for key in idle_keys:
+            channel, thread_ts = key
             session = self._cache.get(key)
             # Never sweep a session whose turn is in flight. `_last_touch` is stamped
             # before the turn, and a turn parked on a human approval outlives the idle
@@ -60,14 +63,35 @@ class SessionManager:
             # mean "not running". close() tears the client down and deletes the .jsonl
             # the CLI child still has open: the turn would then archive nothing and the
             # thread would silently rewind to its last archived turn. Leave it cached;
-            # a later sweep takes it once it is done. (No lock here: sweep must never
-            # block a turn, and the flag is only ever flipped by the session itself.)
+            # a later sweep takes it once it is done.
+            #
+            # Checked BEFORE taking the lock, deliberately: a busy session holds the
+            # thread lock for its whole turn, so blocking on it here would park the
+            # sweeper behind a 30-minute human approval.
             if session is not None and session.busy:
                 continue
-            self._cache.pop(key, None)
-            self._last_touch.pop(key, None)
-            if session is not None:
-                await session.close()
+            # Pop AND close under the per-thread lock. close() deletes this thread's
+            # local .jsonl, but only after awaiting the client's teardown -- which
+            # SIGTERMs the CLI child and yields the event loop for hundreds of ms.
+            # Outside the lock, the user's next message (the "first message after a
+            # lull" -- precisely when the sweeper fires) would find the cache already
+            # popped, build a fresh session, hydrate that same .jsonl from the store
+            # and resume on it, and the late delete would land on the file the live
+            # turn is running on: either the resume fails and a stub transcript is
+            # archived over the thread's only durable history, or the CLI holds the
+            # unlinked inode and the thread silently stops replicating to Postgres.
+            # The sweeper is a background task, so waiting here costs nothing, and a
+            # busy session was already skipped -- the lock is almost never contended.
+            async with self._lock(channel, thread_ts):
+                # A turn may have run while we waited for the lock. Re-check against
+                # the same `now`, and leave a session that is no longer idle cached:
+                # closing it would throw away the client that turn just connected.
+                if not self._is_idle(key, now):
+                    continue
+                session = self._cache.pop(key, None)
+                self._last_touch.pop(key, None)
+                if session is not None:
+                    await session.close()
 
     async def run_sweeper(self, interval: float = 60) -> None:
         while True:

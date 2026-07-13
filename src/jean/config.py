@@ -45,10 +45,18 @@ class Settings(BaseSettings):
     marketplace_cache_dir: Path | None = None
     marketplace_token: str | None = None
 
-    # Weekly Postgres retention cleanup: prune resolved approvals and sessions
-    # idle longer than the retention window. Set cleanup_enabled=false to skip.
+    # Postgres retention cleanup, swept daily by whichever worker claims the cycle.
+    # Sessions and approvals expire on separate schedules: a thread's memory going
+    # stale is not the same event as an audit record aging out. Deleting a session
+    # row also drops its transcript (FK cascade) -- and its engaged/permission_mode,
+    # so a thread quiet this long needs a fresh mention to re-engage jean.
     cleanup_enabled: bool = True
-    cleanup_retention_days: int = 30
+    session_retention_days: int = 3
+    approval_retention_days: int = 30
+    cleanup_interval_hours: int = 24
+    # Refuse to archive a pathological transcript rather than let one thread bloat
+    # the database. Such a thread keeps working, but only on the worker holding it.
+    transcript_max_mb: int = 32
 
     @classmethod
     def load(cls) -> Settings:

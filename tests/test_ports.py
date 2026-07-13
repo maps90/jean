@@ -2,7 +2,15 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 
-from jean.ports import ApprovalCoordinator, ChatSurface, SessionStore, ThreadLock
+from jean.ports import (
+    ApprovalCoordinator,
+    ChatSurface,
+    MaintenanceStore,
+    PruneResult,
+    SessionStore,
+    ThreadLock,
+    TranscriptStore,
+)
 
 
 class StubStore:
@@ -29,6 +37,22 @@ class StubStore:
 
     async def bump_turn(self, channel, thread_ts):
         return 1
+
+
+class StubTranscripts:
+    async def save(self, channel, thread_ts, sdk_session_id, data):
+        return None
+
+    async def load(self, channel, thread_ts, sdk_session_id):
+        return None
+
+
+class StubMaintenance:
+    async def prune(self, *, sessions_older_than, approvals_older_than):
+        return PruneResult(approvals_deleted=0, sessions_deleted=0)
+
+    async def try_claim_cleanup(self, min_interval):
+        return False
 
 
 class StubCoordinator:
@@ -84,6 +108,14 @@ class StubChat:
 
 def test_stub_store_satisfies_session_store_protocol():
     assert isinstance(StubStore(), SessionStore)
+
+
+def test_stub_transcripts_satisfies_transcript_store_protocol():
+    assert isinstance(StubTranscripts(), TranscriptStore)
+
+
+def test_stub_maintenance_satisfies_maintenance_store_protocol():
+    assert isinstance(StubMaintenance(), MaintenanceStore)
 
 
 def test_stub_coordinator_satisfies_protocol():

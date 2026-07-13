@@ -53,7 +53,7 @@ class JeanSession:
         client_factory: Callable[..., Any],
         transcripts: TranscriptStore,
         local: LocalTranscripts,
-        max_transcript_bytes: int = 32 * 1024 * 1024,
+        max_transcript_bytes: int,  # no default: Settings.transcript_max_mb owns the number
     ) -> None:
         self._channel = channel
         self._thread_ts = thread_ts

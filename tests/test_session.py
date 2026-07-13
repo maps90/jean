@@ -10,6 +10,11 @@ from jean.db.memory import MemoryStore
 from jean.session.session import JeanSession, RoutingContext
 from jean.session.transcript import LocalTranscripts
 
+# JeanSession takes its cap from Settings.transcript_max_mb (server.py wires it in),
+# so there is no default to fall back on -- tests that don't care about the cap pass
+# the production value.
+MAX_TRANSCRIPT_BYTES = 32 * 1024 * 1024
+
 
 @dataclass
 class FakeResultMessage:
@@ -95,6 +100,7 @@ async def test_run_turn_persists_session_id_and_sets_status(tmp_path: Path):
         client_factory=factory,
         transcripts=store,
         local=LocalTranscripts(cli_home=tmp_path, cwd=Path("/w")),
+        max_transcript_bytes=MAX_TRANSCRIPT_BYTES,
     )
 
     await session.run_turn("hello")
@@ -124,6 +130,7 @@ async def test_run_turn_reuses_the_connected_client_across_turns(tmp_path: Path)
         client_factory=factory,
         transcripts=store,
         local=LocalTranscripts(cli_home=tmp_path, cwd=Path("/w")),
+        max_transcript_bytes=MAX_TRANSCRIPT_BYTES,
     )
 
     await session.run_turn("hello")
@@ -154,6 +161,7 @@ async def test_second_turn_on_a_fresh_session_resumes_stored_id(tmp_path: Path):
         client_factory=factory1,
         transcripts=store,
         local=local,
+        max_transcript_bytes=MAX_TRANSCRIPT_BYTES,
     )
     await session1.run_turn("hello")
     assert calls1[0]["options"] == {"resume": None}
@@ -170,6 +178,7 @@ async def test_second_turn_on_a_fresh_session_resumes_stored_id(tmp_path: Path):
         client_factory=factory2,
         transcripts=store,
         local=local,
+        max_transcript_bytes=MAX_TRANSCRIPT_BYTES,
     )
     await session2.run_turn("continue")
     assert calls2[0]["options"] == {"resume": "sdk-session-abc"}
@@ -205,6 +214,7 @@ async def test_failed_turn_resets_client_to_none_and_next_turn_rebuilds(tmp_path
         client_factory=factory,
         transcripts=store,
         local=LocalTranscripts(cli_home=tmp_path, cwd=Path("/w")),
+        max_transcript_bytes=MAX_TRANSCRIPT_BYTES,
     )
 
     try:
@@ -248,6 +258,7 @@ async def test_close_disconnects_the_client(tmp_path: Path):
         client_factory=factory,
         transcripts=store,
         local=LocalTranscripts(cli_home=tmp_path, cwd=Path("/w")),
+        max_transcript_bytes=MAX_TRANSCRIPT_BYTES,
     )
     await session.run_turn("hello")
     await session.close()
@@ -291,6 +302,7 @@ async def test_stale_resume_falls_back_to_a_fresh_session(tmp_path: Path):
         client_factory=factory,
         transcripts=store,
         local=LocalTranscripts(cli_home=tmp_path, cwd=Path("/w")),
+        max_transcript_bytes=MAX_TRANSCRIPT_BYTES,
     )
 
     await session.run_turn("hello")
@@ -336,6 +348,7 @@ async def test_connect_failure_unrelated_to_resume_propagates(tmp_path: Path):
         client_factory=factory,
         transcripts=store,
         local=LocalTranscripts(cli_home=tmp_path, cwd=Path("/w")),
+        max_transcript_bytes=MAX_TRANSCRIPT_BYTES,
     )
 
     try:
@@ -352,6 +365,7 @@ async def test_connect_failure_unrelated_to_resume_propagates(tmp_path: Path):
 
 
 def _session(store, chat, factory, local, **kw):
+    kw.setdefault("max_transcript_bytes", MAX_TRANSCRIPT_BYTES)
     return JeanSession(
         "C1",
         "111.0",
@@ -460,6 +474,7 @@ async def test_local_transcript_is_kept_when_archiving_fails(tmp_path: Path):
         client_factory=factory,
         transcripts=BrokenTranscripts(),
         local=local,
+        max_transcript_bytes=MAX_TRANSCRIPT_BYTES,
     )
 
     class WritingClient(FakeSdkClient):

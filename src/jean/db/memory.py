@@ -22,7 +22,8 @@ class _ApprovalRow:
 
 
 class MemoryStore:
-    """In-process implementation of SessionStore + ApprovalCoordinator + ThreadLock.
+    """In-process implementation of SessionStore + TranscriptStore + ApprovalCoordinator
+    + MaintenanceStore + ThreadLock.
 
     Single-process default and the fast test double. The Postgres adapter
     (db/postgres.py) must match these semantics exactly -- see

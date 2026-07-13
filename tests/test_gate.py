@@ -19,7 +19,16 @@ def _action_id_for(blocks: list[dict], verb: str) -> str:
     return next(a for a in _action_ids(blocks) if a.startswith(f"jean_appr:{verb}:"))
 
 
-def _make_gate(coordinator, posted, *, approvers=(), timeout_seconds=1.0, posted_event=None):
+def _make_gate(
+    coordinator,
+    posted,
+    *,
+    approvers=(),
+    timeout_seconds=1.0,
+    posted_event=None,
+    manager=None,
+    env_approvers=(),
+):
     async def post_blocks(channel, thread_ts, text, blocks):
         posted.append(blocks)
         if posted_event is not None:
@@ -30,7 +39,9 @@ def _make_gate(coordinator, posted, *, approvers=(), timeout_seconds=1.0, posted
         post_blocks,
         coordinator,
         approvers_provider=lambda: list(approvers),
+        manager_provider=lambda: manager,
         timeout_seconds=timeout_seconds,
+        env_approvers=env_approvers,
     )
 
 
@@ -116,11 +127,59 @@ async def test_unauthorized_clicker_keeps_it_pending_and_it_times_out():
 async def test_timeout_auto_denies_with_no_click():
     coordinator = MemoryStore()
     posted: list[list[dict]] = []
-    gate = _make_gate(coordinator, posted, approvers=(), timeout_seconds=0.05)
+    approvers = [ApproverEntry(user_id="U11111", scope="", catchall=True)]
+    gate = _make_gate(coordinator, posted, approvers=approvers, timeout_seconds=0.05)
 
     decision = await gate.request("C1", "111.0", "deploy please")
     assert decision.approved is False
     assert decision.by == "system"
+
+
+async def test_no_approver_fails_closed_without_posting_buttons():
+    """With nobody authorized, every click on an Approve button returns
+    'unauthorized' -- including the manager's. Posting buttons no one can press
+    and then hanging for the full approval_ttl is the worst outcome: refuse
+    immediately and say why."""
+    coordinator = MemoryStore()
+    posted: list[list[dict]] = []
+    gate = _make_gate(coordinator, posted, approvers=(), timeout_seconds=30)
+
+    decision = await asyncio.wait_for(gate.request("C1", "111.0", "deploy please"), timeout=1)
+
+    assert decision.approved is False
+    assert decision.by == "system"
+    assert _action_ids(posted[0]) == []  # no dead Approve/Deny buttons
+    text = " ".join(
+        el["text"] for b in posted[0] for el in [b["text"]] if b.get("type") == "section"
+    )
+    assert "no approver" in text.lower()
+
+
+async def test_manager_is_the_last_resort_approver():
+    """An off-scope summary with no catch-all still resolves to the manager."""
+    coordinator = MemoryStore()
+    posted: list[list[dict]] = []
+    posted_event = asyncio.Event()
+    approvers = [ApproverEntry(user_id="U11111", scope="deploy")]
+    gate = _make_gate(
+        coordinator,
+        posted,
+        approvers=approvers,
+        timeout_seconds=5,
+        posted_event=posted_event,
+        manager="U12345",
+    )
+
+    async def click_approve():
+        await posted_event.wait()
+        action_id = _action_id_for(posted[0], "approve")
+        assert await gate.handle_action(action_id, "U12345") == "approved"
+
+    decision, _ = await asyncio.gather(
+        gate.request("C1", "111.0", "upload a file"), click_approve()
+    )
+    assert decision.approved is True
+    assert decision.by == "U12345"
 
 
 async def test_row_and_approvers_exist_before_blocks_are_posted():

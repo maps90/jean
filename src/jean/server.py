@@ -9,7 +9,7 @@ from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
 from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
 from slack_bolt.async_app import AsyncApp
 
-from jean.agent_options import build_agent_options
+from jean.agent_options import build_agent_options, build_can_use_tool
 from jean.approval.gate import ApprovalGate
 from jean.config import Settings
 from jean.db.postgres import PostgresStore
@@ -68,12 +68,26 @@ async def run() -> None:
         )
         return resp["ts"]
 
+    def manager_of() -> str | None:
+        manager = soul_provider().manager
+        return manager.user_id if manager else None
+
     gate = ApprovalGate(
         post_blocks,
         store,
         approvers_provider=lambda: soul_provider().approvers,
+        manager_provider=manager_of,
         timeout_seconds=settings.approval_ttl,
+        env_approvers=settings.approvers,
     )
+    if not soul_provider().approvers and not settings.approvers and manager_of() is None:
+        # Every approval will fail closed until this is fixed -- say so at boot
+        # rather than at the first tool call a human is waiting on.
+        logger.error(
+            "no approvers configured: %s names no approver and no manager, and JEAN_APPROVERS "
+            "is unset. jean will refuse every action that needs approval.",
+            settings.identity_path,
+        )
 
     routing = RoutingContext()
     server_mcp, tool_names, _tools = build_slack_mcp(
@@ -119,19 +133,28 @@ async def run() -> None:
     take_over_plugin_mcp(plugins)
     mcp_servers = {**build_proxy_servers(mcp_clients), **remote_servers(extra_mcp)}
 
-    def options_factory(resume: str | None) -> ClaudeAgentOptions:
-        return build_agent_options(
-            persona_text=persona_text,
-            agent_name=soul_provider().identity.name,
-            slack_server=server_mcp,
-            slack_tool_names=tool_names,
-            mcp_servers=mcp_servers,
-            plugins=plugins,
-            settings=settings,
-            resume=resume,
-        )
-
     def session_factory(channel: str, thread_ts: str) -> JeanSession:
+        # Bound per session: the permission hook waits on a human for up to
+        # approval_ttl, and the RoutingContext the MCP tools read is process-wide
+        # -- another thread starting a turn during that wait would repoint it and
+        # send this approval to the wrong thread. The channel/thread are known
+        # here, so close over them instead.
+        can_use_tool = build_can_use_tool(gate, channel=channel, thread_ts=thread_ts)
+
+        def options_factory(resume: str | None, permission_mode: str | None) -> ClaudeAgentOptions:
+            return build_agent_options(
+                persona_text=persona_text,
+                agent_name=soul_provider().identity.name,
+                slack_server=server_mcp,
+                slack_tool_names=tool_names,
+                mcp_servers=mcp_servers,
+                plugins=plugins,
+                settings=settings,
+                resume=resume,
+                permission_mode=permission_mode,
+                can_use_tool=can_use_tool,
+            )
+
         return JeanSession(
             channel,
             thread_ts,

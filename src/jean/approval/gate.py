@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 import uuid
 from collections.abc import Awaitable, Callable
@@ -8,6 +9,8 @@ from jean.approval.authz import select_approvers
 from jean.persona.model import ApproverEntry
 from jean.ports import ApprovalCoordinator, ApprovalDecision
 
+logger = logging.getLogger("jean.approval")
+
 ACTION_RE = re.compile(r"^jean_appr:(approve|deny):(.+)$")
 
 # (channel, thread_ts, text, blocks) -> posted message ts. Kept as a plain
@@ -15,6 +18,7 @@ ACTION_RE = re.compile(r"^jean_appr:(approve|deny):(.+)$")
 # slack_sdk imports (ports & adapters: the domain layer stays infra-free).
 PostBlocks = Callable[[str, str, str, list[dict]], Awaitable[str]]
 ApproversProvider = Callable[[], list[ApproverEntry]]
+ManagerProvider = Callable[[], str | None]
 
 
 class ApprovalGate:
@@ -29,19 +33,42 @@ class ApprovalGate:
         *,
         approvers_provider: ApproversProvider,
         timeout_seconds: float,
+        manager_provider: ManagerProvider = lambda: None,
         env_approvers: tuple[str, ...] = (),
     ) -> None:
         self._post_blocks = post_blocks
         self._coordinator = coordinator
         self._approvers_provider = approvers_provider
+        self._manager_provider = manager_provider
         self._timeout_seconds = timeout_seconds
         self._env_approvers = env_approvers
 
     async def request(self, channel: str, thread_ts: str, summary: str) -> ApprovalDecision:
-        approval_id = uuid.uuid4().hex
         approvers = select_approvers(
-            summary, self._approvers_provider(), env_fallback=self._env_approvers
+            summary,
+            self._approvers_provider(),
+            env_fallback=self._env_approvers,
+            manager=self._manager_provider(),
         )
+        if not approvers:
+            # Fail closed, now, rather than posting buttons that authorize
+            # nobody: handle_action checks the clicker against this set, so an
+            # empty one makes EVERY click "unauthorized" -- the request would
+            # hang for the full approval_ttl and then auto-deny as "system",
+            # with the thread none the wiser. Say so instead.
+            logger.error(
+                "no approver resolved for %r in %s/%s -- refusing. Set JEAN_APPROVERS or name "
+                "a catch-all approver (or a manager) in IDENTITY.md.",
+                summary,
+                channel,
+                thread_ts,
+            )
+            await self._post_blocks(
+                channel, thread_ts, "Cannot approve: no approver configured.", _no_approver_blocks()
+            )
+            return ApprovalDecision(False, "system")
+
+        approval_id = uuid.uuid4().hex
         # Row + approver set must exist BEFORE the blocks (which embed
         # approval_id in their action_ids) are posted -- otherwise a click
         # that lands between posting and set_approvers finds no pending row
@@ -73,8 +100,26 @@ class ApprovalGate:
         return "approved" if verb == "approve" else "denied"
 
 
+def _no_approver_blocks() -> list[dict]:
+    return [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": (
+                    "*Cannot approve: no approver configured.*\n"
+                    "I need a human who is allowed to approve this, and nobody is. "
+                    "Name a catch-all approver (or a manager) in `IDENTITY.md`, or set "
+                    "`JEAN_APPROVERS`. Not running the action."
+                ),
+            },
+        }
+    ]
+
+
 def _build_blocks(approval_id: str, summary: str, approvers: set[str]) -> list[dict]:
-    mentions = " ".join(f"<@{uid}>" for uid in sorted(approvers)) or "(no approver configured)"
+    # `approvers` is never empty here -- request() fails closed before this.
+    mentions = " ".join(f"<@{uid}>" for uid in sorted(approvers))
     return [
         {
             "type": "section",

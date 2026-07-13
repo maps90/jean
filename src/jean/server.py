@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Protocol
 
 from aiohttp import web
 from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
@@ -24,12 +27,20 @@ from jean.plugins.manifest import load_mcp_config, load_plugin_manifest
 from jean.plugins.mcp_client import start_clients
 from jean.plugins.mcp_config import remote_servers, stdio_servers, take_over_plugin_mcp
 from jean.plugins.mcp_proxy import build_proxy_servers
+from jean.ports import ChatSurface, MaintenanceStore, SessionStore, TranscriptStore
 from jean.session.manager import SessionManager
 from jean.session.session import JeanSession, RoutingContext
+from jean.session.transcript import LocalTranscripts
 from jean.slack.client import SlackSurface
 from jean.slack.mcp import build_slack_mcp
 
 logger = logging.getLogger("jean.server")
+
+
+class _Store(SessionStore, TranscriptStore, MaintenanceStore, Protocol):
+    """The one adapter (PostgresStore in production; FakeStore in tests)
+    that structurally satisfies all three ports at once, so it can be passed
+    as all three without a cast."""
 
 
 @dataclass
@@ -38,6 +49,57 @@ class _SoulCell:
     SoulData (a seam for a future hot-reload command; v1 loads it once)."""
 
     soul: SoulData
+
+
+def build_local_transcripts(settings: Settings) -> LocalTranscripts:
+    """`cwd` MUST equal the `cwd` build_agent_options hands the CLI
+    (settings.home / "workspaces", see agent_options.py) -- LocalTranscripts
+    derives the CLI's on-disk project directory by slugifying it, and a
+    mismatch here makes transcript hydration silently look in the wrong
+    directory (see JeanSession._archive's warning log)."""
+    return LocalTranscripts(cli_home=Path.home(), cwd=settings.home / "workspaces")
+
+
+def build_session_factory(
+    *,
+    settings: Settings,
+    store: _Store,
+    chat: ChatSurface,
+    routing: RoutingContext,
+    options_factory: Callable[[str | None], ClaudeAgentOptions],
+    client_factory: Callable[..., Any],
+    local_transcripts: LocalTranscripts,
+) -> Callable[[str, str], JeanSession]:
+    """`store` is handed to JeanSession as both `store=` and `transcripts=`:
+    PostgresStore satisfies SessionStore and TranscriptStore structurally, so
+    one object serves both roles."""
+
+    def session_factory(channel: str, thread_ts: str) -> JeanSession:
+        return JeanSession(
+            channel,
+            thread_ts,
+            store=store,
+            chat=chat,
+            routing=routing,
+            options_factory=options_factory,
+            client_factory=client_factory,
+            transcripts=store,
+            local=local_transcripts,
+            max_transcript_bytes=settings.transcript_max_mb * 1024 * 1024,
+        )
+
+    return session_factory
+
+
+def build_cleanup_scheduler(store: MaintenanceStore, settings: Settings) -> CleanupScheduler:
+    """Sessions and approvals expire on separate windows -- a thread's memory
+    going stale and an audit record aging out are different concerns."""
+    return CleanupScheduler(
+        store,
+        session_retention_seconds=settings.session_retention_days * 86400,
+        approval_retention_seconds=settings.approval_retention_days * 86400,
+        interval_seconds=settings.cleanup_interval_hours * 3600,
+    )
 
 
 async def run() -> None:
@@ -131,16 +193,16 @@ async def run() -> None:
             resume=resume,
         )
 
-    def session_factory(channel: str, thread_ts: str) -> JeanSession:
-        return JeanSession(
-            channel,
-            thread_ts,
-            store=store,
-            chat=chat,
-            routing=routing,
-            options_factory=options_factory,
-            client_factory=ClaudeSDKClient,
-        )
+    local_transcripts = build_local_transcripts(settings)
+    session_factory = build_session_factory(
+        settings=settings,
+        store=store,
+        chat=chat,
+        routing=routing,
+        options_factory=options_factory,
+        client_factory=ClaudeSDKClient,
+        local_transcripts=local_transcripts,
+    )
 
     manager = SessionManager(
         session_factory=session_factory,
@@ -158,9 +220,7 @@ async def run() -> None:
         manager.run_sweeper(),
     ]
     if settings.cleanup_enabled:
-        scheduler = CleanupScheduler(
-            store, retention_seconds=settings.cleanup_retention_days * 86400
-        )
+        scheduler = build_cleanup_scheduler(store, settings)
         tasks.append(scheduler.run())
 
     try:

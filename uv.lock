@@ -636,7 +636,7 @@ requires-dist = [
     { name = "asyncpg", specifier = ">=0.29" },
     { name = "claude-agent-sdk", specifier = "==0.2.110" },
     { name = "pydantic", specifier = ">=2.6" },
-    { name = "pydantic-settings", specifier = ">=2.2" },
+    { name = "pydantic-settings", specifier = ">=2.3" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "slack-bolt", extras = ["async"], specifier = ">=1.29" },
 ]

@@ -137,7 +137,7 @@ async def test_run_turn_persists_session_id_and_sets_status(tmp_path: Path):
         store=store,
         chat=chat,
         routing=routing,
-        options_factory=lambda resume: {"resume": resume},
+        options_factory=lambda resume, mode=None: {"resume": resume, "mode": mode},
         client_factory=factory,
         transcripts=store,
         local=LocalTranscripts(cli_home=tmp_path, cwd=Path("/w")),
@@ -148,7 +148,7 @@ async def test_run_turn_persists_session_id_and_sets_status(tmp_path: Path):
 
     row = await store.get_session("C1", "111.0")
     assert row.sdk_session_id == "sdk-session-abc"
-    assert calls[0]["options"] == {"resume": None}  # first turn: nothing to resume
+    assert calls[0]["options"]["resume"] is None  # first turn: nothing to resume
     assert routing.channel == "C1"
     assert routing.thread_ts == "111.0"
     assert ("C1", "111.0", "is thinking...") in chat.statuses
@@ -167,7 +167,7 @@ async def test_run_turn_reuses_the_connected_client_across_turns(tmp_path: Path)
         store=store,
         chat=chat,
         routing=routing,
-        options_factory=lambda resume: {"resume": resume},
+        options_factory=lambda resume, mode=None: {"resume": resume, "mode": mode},
         client_factory=factory,
         transcripts=store,
         local=LocalTranscripts(cli_home=tmp_path, cwd=Path("/w")),
@@ -198,14 +198,14 @@ async def test_second_turn_on_a_fresh_session_resumes_stored_id(tmp_path: Path):
         store=store,
         chat=chat,
         routing=routing1,
-        options_factory=lambda resume: {"resume": resume},
+        options_factory=lambda resume, mode=None: {"resume": resume, "mode": mode},
         client_factory=factory1,
         transcripts=store,
         local=local,
         max_transcript_bytes=MAX_TRANSCRIPT_BYTES,
     )
     await session1.run_turn("hello")
-    assert calls1[0]["options"] == {"resume": None}
+    assert calls1[0]["options"]["resume"] is None
 
     routing2 = RoutingContext()
     factory2, calls2 = _client_factory()
@@ -215,14 +215,14 @@ async def test_second_turn_on_a_fresh_session_resumes_stored_id(tmp_path: Path):
         store=store,
         chat=chat,
         routing=routing2,
-        options_factory=lambda resume: {"resume": resume},
+        options_factory=lambda resume, mode=None: {"resume": resume, "mode": mode},
         client_factory=factory2,
         transcripts=store,
         local=local,
         max_transcript_bytes=MAX_TRANSCRIPT_BYTES,
     )
     await session2.run_turn("continue")
-    assert calls2[0]["options"] == {"resume": "sdk-session-abc"}
+    assert calls2[0]["options"]["resume"] == "sdk-session-abc"
 
 
 async def test_failed_turn_resets_client_to_none_and_next_turn_rebuilds(tmp_path: Path):
@@ -251,7 +251,7 @@ async def test_failed_turn_resets_client_to_none_and_next_turn_rebuilds(tmp_path
         store=store,
         chat=chat,
         routing=routing,
-        options_factory=lambda resume: {"resume": resume},
+        options_factory=lambda resume, mode=None: {"resume": resume, "mode": mode},
         client_factory=factory,
         transcripts=store,
         local=LocalTranscripts(cli_home=tmp_path, cwd=Path("/w")),
@@ -278,7 +278,7 @@ async def test_failed_turn_resets_client_to_none_and_next_turn_rebuilds(tmp_path
     await session.run_turn("again")
 
     assert len(calls) == 2
-    assert calls[1]["options"] == {"resume": None}
+    assert calls[1]["options"]["resume"] is None
     assert session._client is not None
 
 
@@ -295,7 +295,7 @@ async def test_close_disconnects_the_client(tmp_path: Path):
         store=store,
         chat=chat,
         routing=routing,
-        options_factory=lambda resume: {"resume": resume},
+        options_factory=lambda resume, mode=None: {"resume": resume, "mode": mode},
         client_factory=factory,
         transcripts=store,
         local=LocalTranscripts(cli_home=tmp_path, cwd=Path("/w")),
@@ -339,7 +339,7 @@ async def test_stale_resume_falls_back_to_a_fresh_session(tmp_path: Path):
         store=store,
         chat=chat,
         routing=routing,
-        options_factory=lambda resume: {"resume": resume},
+        options_factory=lambda resume, mode=None: {"resume": resume, "mode": mode},
         client_factory=factory,
         transcripts=store,
         local=LocalTranscripts(cli_home=tmp_path, cwd=Path("/w")),
@@ -385,7 +385,7 @@ async def test_connect_failure_unrelated_to_resume_propagates(tmp_path: Path):
         store=store,
         chat=chat,
         routing=routing,
-        options_factory=lambda resume: {"resume": resume},
+        options_factory=lambda resume, mode=None: {"resume": resume, "mode": mode},
         client_factory=factory,
         transcripts=store,
         local=LocalTranscripts(cli_home=tmp_path, cwd=Path("/w")),
@@ -415,7 +415,7 @@ def _session(store, chat, factory, local, **kw):
         store=store,
         chat=chat,
         routing=RoutingContext(),
-        options_factory=lambda resume: {"resume": resume},
+        options_factory=lambda resume, mode=None: {"resume": resume, "mode": mode},
         client_factory=factory,
         transcripts=store,
         local=local,
@@ -461,7 +461,7 @@ async def test_cold_worker_hydrates_the_transcript_before_resuming(tmp_path: Pat
     await session.run_turn("continue")
 
     assert local.read("sdk-session-abc") == b'{"type":"user"}\n'  # hydrated
-    assert calls[0]["options"] == {"resume": "sdk-session-abc"}
+    assert calls[0]["options"]["resume"] == "sdk-session-abc"
     assert chat.replies == []  # no "I lost my memory" note -- it didn't
 
 
@@ -489,7 +489,7 @@ async def test_cached_client_is_dropped_when_another_worker_advanced_the_thread(
     await worker_a.run_turn("third")  # back to A, whose cached client is now stale
 
     assert len(calls_a) == 2, "worker A must rebuild its client, not reuse the stale one"
-    assert calls_a[1]["options"] == {"resume": "sdk-session-abc"}
+    assert calls_a[1]["options"]["resume"] == "sdk-session-abc"
 
 
 async def test_local_transcript_is_kept_when_archiving_fails(tmp_path: Path):
@@ -513,7 +513,7 @@ async def test_local_transcript_is_kept_when_archiving_fails(tmp_path: Path):
         store=store,
         chat=chat,
         routing=RoutingContext(),
-        options_factory=lambda resume: {"resume": resume},
+        options_factory=lambda resume, mode=None: {"resume": resume, "mode": mode},
         client_factory=factory,
         transcripts=BrokenTranscripts(),
         local=local,
@@ -660,7 +660,7 @@ async def test_hydration_does_not_clobber_a_newer_unarchived_local_transcript(tm
 
     # the store's stale turn-1 blob must NOT have been written over our turn-2 file
     assert local.read("sdk-session-abc") == b'{"turn":1}\n{"turn":2}\n'
-    assert calls[-1]["options"] == {"resume": "sdk-session-abc"}
+    assert calls[-1]["options"]["resume"] == "sdk-session-abc"
     assert chat.replies == []  # the resume worked; no "I lost my memory" note
     # ... and this turn heals the store
     assert await store.load("C1", "111.0", "sdk-session-abc") == b'{"turn":1}\n{"turn":2}\n'
@@ -734,7 +734,7 @@ async def test_unarchived_local_transcript_loses_to_a_turn_another_worker_commit
     await worker_a.run_turn("third")  # A's cached client is stale -> close() + _connect
 
     # A resumed the STORE's transcript, not its own stale local branch ...
-    assert calls_a[1]["options"] == {"resume": "sdk-session-abc"}
+    assert calls_a[1]["options"]["resume"] == "sdk-session-abc"
     assert local_a.read("sdk-session-abc") == b'{"turn":2,"by":"b"}\n{"turn":3,"by":"a"}\n'
     # ... so B's turn is still there, not overwritten by A's un-archived turn 1
     assert (
@@ -846,7 +846,7 @@ async def test_close_survives_a_client_whose_teardown_raises(tmp_path: Path):
     await session.run_turn("again")  # must not raise
 
     assert len(calls) == 2, "the stale client must be replaced, not reused"
-    assert calls[1]["options"] == {"resume": "sdk-session-abc"}
+    assert calls[1]["options"]["resume"] == "sdk-session-abc"
     assert FakeSdkClient.instances[-1].queried == ["again"]
 
     await session.close()
@@ -1089,3 +1089,45 @@ async def test_settle_wait_does_not_fire_when_there_is_no_local_transcript(tmp_p
 
     assert elapsed < 1.0, "run_turn sat in the settle wait with no file to wait for"
     assert local.read("sdk-session-abc") is None
+
+
+async def test_the_threads_permission_mode_reaches_the_sdk(tmp_path: Path):
+    """/mode writes permission_mode to the store; without this the SDK was only
+    ever given the deployment-wide default and the command was a no-op."""
+    FakeSdkClient.instances.clear()
+    store, chat = MemoryStore(), FakeChat()
+    local = LocalTranscripts(cli_home=tmp_path, cwd=Path("/w"))
+    factory, calls = _client_factory()
+    await store.upsert_session("C1", "111.0", permission_mode="plan")
+
+    session = _session(store, chat, factory, local)
+    await session.run_turn("hello")
+
+    assert calls[0]["options"]["mode"] == "plan"
+
+
+async def test_changing_mode_mid_thread_rebuilds_the_client(tmp_path: Path):
+    """permission_mode is fixed when the SDK client connects, so a cached client
+    would keep the old mode forever -- `/mode bypassPermissions` (the escape
+    hatch from approval prompts) would appear to do nothing until the idle sweep
+    dropped the session, up to idle_minutes later.
+
+    Note the turn_seq guard cannot stand in for this: this worker took both turns
+    itself, so its cached client is perfectly current with the store (`turn_seq ==
+    _seen_seq`) -- only the mode moved."""
+    FakeSdkClient.instances.clear()
+    store, chat = MemoryStore(), FakeChat()
+    local = LocalTranscripts(cli_home=tmp_path, cwd=Path("/w"))
+    factory, calls = _client_factory()
+
+    session = _session(store, chat, factory, local)
+    await session.run_turn("hello")
+    assert calls[0]["options"]["mode"] is None
+
+    await store.upsert_session("C1", "111.0", permission_mode="bypassPermissions", touch=False)
+    await session.run_turn("now hurry up")
+
+    assert len(calls) == 2  # rebuilt rather than reusing the cached client
+    assert calls[1]["options"]["mode"] == "bypassPermissions"
+    assert calls[1]["options"]["resume"] == "sdk-session-abc"  # same conversation
+    assert FakeSdkClient.instances[0].exited is True  # old client closed, not leaked

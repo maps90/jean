@@ -233,6 +233,25 @@ async def assert_prune_uses_separate_windows_and_drops_transcripts(store) -> Non
     assert await store.load("C-old", "1.0", "sid-old") is None
 
 
+async def assert_bump_turn_on_a_new_thread_is_not_born_expired(store) -> None:
+    """bump_turn's create-the-row-if-absent branch must not leave last_active_at
+    at its zero default -- a row born that way would already be older than any
+    retention cutoff, so the very next cleanup sweep would delete it."""
+    channel, thread_ts = "C-newborn", "1000.1"
+    assert await store.get_session(channel, thread_ts) is None
+
+    assert await store.bump_turn(channel, thread_ts) == 1
+    row = await store.get_session(channel, thread_ts)
+    assert row is not None
+    assert row.last_active_at > 0
+
+    result = await store.prune(
+        sessions_older_than=time.time() - 3600, approvals_older_than=time.time() - 3600
+    )
+    assert result.sessions_deleted == 0
+    assert await store.get_session(channel, thread_ts) is not None
+
+
 async def _backdate_session(store, channel: str, thread_ts: str, when: float) -> None:
     """Force a session's last_active_at into the past. Both adapters store it as
     an epoch float, but only through their own writes -- so reach in per adapter."""

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import gzip
 from contextlib import asynccontextmanager
 
 import asyncpg
@@ -23,6 +24,16 @@ CREATE TABLE IF NOT EXISTS approvals (
   resolved_at double precision);
 CREATE TABLE IF NOT EXISTS maintenance (
   job text PRIMARY KEY, last_run double precision NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS transcripts (
+  channel text NOT NULL, thread_ts text NOT NULL,
+  sdk_session_id text NOT NULL,
+  data bytea NOT NULL,
+  raw_bytes bigint NOT NULL DEFAULT 0,
+  updated_at double precision NOT NULL DEFAULT extract(epoch from now()),
+  PRIMARY KEY (channel, thread_ts),
+  FOREIGN KEY (channel, thread_ts) REFERENCES sessions(channel, thread_ts) ON DELETE CASCADE);
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS turn_seq bigint NOT NULL DEFAULT 0;
+ALTER TABLE transcripts ALTER COLUMN data SET STORAGE EXTERNAL;
 """
 
 
@@ -71,6 +82,7 @@ class PostgresStore:
                 permission_mode=r["permission_mode"],
                 engaged=r["engaged"],
                 last_active_at=r["last_active_at"],
+                turn_seq=r["turn_seq"],
             )
         )
 
@@ -110,6 +122,47 @@ class PostgresStore:
             "SELECT engaged FROM sessions WHERE channel=$1 AND thread_ts=$2", channel, thread_ts
         )
         return bool(v)
+
+    async def bump_turn(self, channel: str, thread_ts: str) -> int:
+        # INSERT..ON CONFLICT so a bump on a thread with no row yet still works;
+        # RETURNING hands back the new value the caller must remember. A newly
+        # inserted row is touched (last_active_at=now) so it isn't already
+        # older than every retention cutoff before its first real turn; the
+        # conflict path leaves last_active_at alone -- the turn's own
+        # upsert_session call already touches it.
+        return await self._pool.fetchval(
+            """INSERT INTO sessions(channel,thread_ts,turn_seq,last_active_at)
+               VALUES($1,$2,1,extract(epoch from now()))
+               ON CONFLICT(channel,thread_ts) DO UPDATE SET turn_seq=sessions.turn_seq+1
+               RETURNING turn_seq""",
+            channel,
+            thread_ts,
+        )
+
+    # ---- TranscriptStore ----  gzip is a storage detail; the port speaks raw bytes.
+    async def save(self, channel: str, thread_ts: str, sdk_session_id: str, data: bytes) -> None:
+        await self._pool.execute(
+            """INSERT INTO transcripts(channel,thread_ts,sdk_session_id,data,raw_bytes,updated_at)
+               VALUES($1,$2,$3,$4,$5,extract(epoch from now()))
+               ON CONFLICT(channel,thread_ts) DO UPDATE SET
+                 sdk_session_id=$3, data=$4, raw_bytes=$5,
+                 updated_at=extract(epoch from now())""",
+            channel,
+            thread_ts,
+            sdk_session_id,
+            gzip.compress(data),
+            len(data),
+        )
+
+    async def load(self, channel: str, thread_ts: str, sdk_session_id: str) -> bytes | None:
+        r = await self._pool.fetchrow(
+            "SELECT sdk_session_id, data FROM transcripts WHERE channel=$1 AND thread_ts=$2",
+            channel,
+            thread_ts,
+        )
+        if r is None or r["sdk_session_id"] != sdk_session_id:
+            return None
+        return gzip.decompress(r["data"])
 
     # ---- ThreadLock ----  advisory *xact* lock auto-releases on tx end.
     # This is held for the ENTIRE agent turn (per-thread serialization across

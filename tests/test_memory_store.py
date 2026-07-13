@@ -4,6 +4,7 @@ import pytest
 
 from jean.db.memory import MemoryStore
 from tests.store_behavior import (
+    assert_bump_turn_on_a_new_thread_is_not_born_expired,
     assert_coordinator_approve_flow,
     assert_coordinator_resolve_unknown_returns_false,
     assert_coordinator_stores_approvers_and_pending,
@@ -80,3 +81,7 @@ async def test_transcript_roundtrip(store):
 
 async def test_prune_uses_separate_windows_and_drops_transcripts(store):
     await assert_prune_uses_separate_windows_and_drops_transcripts(store)
+
+
+async def test_bump_turn_on_a_new_thread_is_not_born_expired(store):
+    await assert_bump_turn_on_a_new_thread_is_not_born_expired(store)

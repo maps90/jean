@@ -11,6 +11,7 @@ from jean.db.postgres import PostgresStore
 pytestmark = pytest.mark.skipif(not os.environ.get("JEAN_TEST_DATABASE_URL"), reason="no test db")
 
 from tests.store_behavior import (  # noqa: E402
+    assert_bump_turn_on_a_new_thread_is_not_born_expired,
     assert_coordinator_approve_flow,
     assert_coordinator_resolve_unknown_returns_false,
     assert_coordinator_stores_approvers_and_pending,
@@ -18,10 +19,13 @@ from tests.store_behavior import (  # noqa: E402
     assert_coordinator_wait_unknown_id_denies_after_timeout,
     assert_prune_keeps_recent_rows,
     assert_prune_removes_resolved_approvals_and_stale_sessions,
+    assert_prune_uses_separate_windows_and_drops_transcripts,
     assert_session_roundtrip_and_engagement,
     assert_thread_lock_allows_different_threads,
     assert_thread_lock_serializes_same_thread,
+    assert_transcript_roundtrip,
     assert_try_claim_cleanup_gates_on_interval,
+    assert_turn_seq_increments,
 )
 
 
@@ -30,7 +34,7 @@ async def store():
     dsn = os.environ["JEAN_TEST_DATABASE_URL"]
     s = await PostgresStore.connect(dsn)
     async with s._pool.acquire() as c:
-        await c.execute("TRUNCATE sessions, approvals, maintenance")
+        await c.execute("TRUNCATE transcripts, sessions, approvals, maintenance")
     yield s
     await s.close()
 
@@ -85,6 +89,41 @@ async def test_prune_keeps_recent_rows(store):
 
 async def test_try_claim_cleanup_gates_on_interval(store):
     await assert_try_claim_cleanup_gates_on_interval(store)
+
+
+async def test_turn_seq_increments(store):
+    await assert_turn_seq_increments(store)
+
+
+async def test_transcript_roundtrip(store):
+    await assert_transcript_roundtrip(store)
+
+
+async def test_prune_uses_separate_windows_and_drops_transcripts(store):
+    await assert_prune_uses_separate_windows_and_drops_transcripts(store)
+
+
+async def test_bump_turn_on_a_new_thread_is_not_born_expired(store):
+    await assert_bump_turn_on_a_new_thread_is_not_born_expired(store)
+
+
+async def test_transcript_is_compressed_at_rest(store):
+    """The blob is gzipped in the column -- that's what makes the ~4.4x saving
+    real -- but that is the adapter's business, invisible through the port."""
+    await store.upsert_session("C-gz", "1.0", sdk_session_id="sid-gz")
+    blob = b'{"type":"user","text":"hello hello hello"}\n' * 200
+    await store.save("C-gz", "1.0", "sid-gz", blob)
+
+    stored = await store._pool.fetchval(
+        "SELECT data FROM transcripts WHERE channel='C-gz' AND thread_ts='1.0'"
+    )
+    assert len(stored) < len(blob)  # compressed on disk
+    assert await store.load("C-gz", "1.0", "sid-gz") == blob  # identical through the port
+
+    raw = await store._pool.fetchval(
+        "SELECT raw_bytes FROM transcripts WHERE channel='C-gz' AND thread_ts='1.0'"
+    )
+    assert raw == len(blob)
 
 
 async def test_notify_wakes_a_different_connection(store):

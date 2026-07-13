@@ -19,6 +19,18 @@ ALLOWED_PERMISSION_MODES = {
 }
 
 
+def ephemeral_for(result: str) -> str | None:
+    """What to tell the clicker privately, if anything. A decided request has
+    its buttons rewritten away (ApprovalGate._retire), so "gone" here means the
+    click raced the rewrite or hit a stale message -- say so, rather than
+    leaving them clicking a button that silently does nothing."""
+    if result == "unauthorized":
+        return "You are not authorized to approve or deny this request."
+    if result == "gone":
+        return "This request was already decided or has expired."
+    return None
+
+
 def help_text(agent_name: str) -> str:
     return (
         f"{agent_name} commands:\n"
@@ -142,11 +154,10 @@ def register(app: Any, gw: Gateway) -> None:
         action_id = body["actions"][0]["action_id"]
         user_id = body["user"]["id"]
         result = await gw.on_action(action_id, user_id)
-        if result == "unauthorized":
+        message = ephemeral_for(result)
+        if message is not None:
             await client.chat_postEphemeral(
-                channel=body["channel"]["id"],
-                user=user_id,
-                text="You are not authorized to approve or deny this request.",
+                channel=body["channel"]["id"], user=user_id, text=message
             )
 
     @app.command("/mode")

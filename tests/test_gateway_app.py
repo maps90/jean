@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from jean.db.memory import MemoryStore
-from jean.gateway.app import Gateway
+from jean.gateway.app import Gateway, ephemeral_for
 from jean.persona.model import Identity, Manager, SoulData
 
 
@@ -119,6 +119,16 @@ async def test_on_action_delegates_to_gate():
 
     assert result == "denied"
     assert gate.calls == [("jean_appr:deny:abc", "U11111")]
+
+
+def test_ephemeral_only_for_clicks_that_did_nothing():
+    """A click that changed nothing must say so -- silence is what made people
+    click Approve over and over."""
+    assert "not authorized" in (ephemeral_for("unauthorized") or "")
+    assert "already decided" in (ephemeral_for("gone") or "")
+    # A click that DID decide needs no ephemeral: the message rewrite is the feedback.
+    assert ephemeral_for("approved") is None
+    assert ephemeral_for("denied") is None
 
 
 async def test_mode_command_persists_permission_mode():

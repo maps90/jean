@@ -17,6 +17,8 @@ ACTION_RE = re.compile(r"^jean_appr:(approve|deny):(.+)$")
 # callable (not the concrete Slack client) so approval/ stays free of
 # slack_sdk imports (ports & adapters: the domain layer stays infra-free).
 PostBlocks = Callable[[str, str, str, list[dict]], Awaitable[str]]
+# (channel, ts, text, blocks) -> rewrite an already-posted message in place.
+UpdateBlocks = Callable[[str, str, str, list[dict]], Awaitable[None]]
 ApproversProvider = Callable[[], list[ApproverEntry]]
 ManagerProvider = Callable[[], str | None]
 
@@ -31,12 +33,14 @@ class ApprovalGate:
         post_blocks: PostBlocks,
         coordinator: ApprovalCoordinator,
         *,
+        update_blocks: UpdateBlocks,
         approvers_provider: ApproversProvider,
         timeout_seconds: float,
         manager_provider: ManagerProvider = lambda: None,
         env_approvers: tuple[str, ...] = (),
     ) -> None:
         self._post_blocks = post_blocks
+        self._update_blocks = update_blocks
         self._coordinator = coordinator
         self._approvers_provider = approvers_provider
         self._manager_provider = manager_provider
@@ -77,8 +81,26 @@ class ApprovalGate:
         await self._coordinator.create(approval_id, channel, thread_ts, summary)
         await self._coordinator.set_approvers(approval_id, approvers)
         blocks = _build_blocks(approval_id, summary, approvers)
-        await self._post_blocks(channel, thread_ts, f"Approval requested: {summary}", blocks)
-        return await self._coordinator.wait(approval_id, self._timeout_seconds)
+        ts = await self._post_blocks(channel, thread_ts, f"Approval requested: {summary}", blocks)
+        decision = await self._coordinator.wait(approval_id, self._timeout_seconds)
+        # The buttons are the clicker's only feedback, so retire them here --
+        # on whichever worker is waiting, for every outcome (approve, deny,
+        # timeout). Without this the message keeps its live buttons and a
+        # decided request looks untouched, so people click it again.
+        await self._retire(channel, ts, summary, decision)
+        return decision
+
+    async def _retire(
+        self, channel: str, ts: str, summary: str, decision: ApprovalDecision
+    ) -> None:
+        text, blocks = _resolved_message(summary, decision)
+        try:
+            await self._update_blocks(channel, ts, text, blocks)
+        except Exception:  # noqa: BLE001 -- best-effort Slack nicety
+            # The decision is already durable in the coordinator and is what
+            # the agent acts on; a failed rewrite must not turn it into an
+            # error. Loud in the log, harmless to the turn.
+            logger.warning("could not rewrite approval message %s/%s", channel, ts, exc_info=True)
 
     async def handle_action(self, action_id: str, user_id: str) -> str:
         match = ACTION_RE.match(action_id)
@@ -114,6 +136,28 @@ def _no_approver_blocks() -> list[dict]:
                 ),
             },
         }
+    ]
+
+
+def _resolved_message(summary: str, decision: ApprovalDecision) -> tuple[str, list[dict]]:
+    """The decided form of the request: same summary, no actions block. `by` is
+    the sentinel "system" on a timeout -- not a Slack id, so never mention it."""
+    if decision.by == "system":
+        headline, footer = "Approval expired", "No answer in time -- treated as denied."
+    elif decision.approved:
+        headline, footer = "Approved", f"Approved by <@{decision.by}>"
+    else:
+        headline, footer = "Denied", f"Denied by <@{decision.by}>"
+    text = f"{headline}: {summary}"
+    return text, [
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": f"*{headline}*\n{summary}"},
+        },
+        {
+            "type": "context",
+            "elements": [{"type": "mrkdwn", "text": footer}],
+        },
     ]
 
 

@@ -112,12 +112,32 @@ class JeanSession:
         if resume is None:
             return await self._open(None)
 
-        data = await self._transcripts.load(self._channel, self._thread_ts, resume)
-        if data is not None:
-            self._local.write(resume, data)
+        # ... unless OUR local file is the newer copy. `_archived is False` for
+        # `_sid` means the store never took our last turn (a save() failed, or the
+        # transcript was over the cap), so its blob is older and hydrating from it
+        # would erase that turn. Only this instance's own bookkeeping can tell us
+        # that, and it is trustworthy here: the staleness path in run_turn calls
+        # close() before reconnecting, and close() deletes the local file whenever
+        # it IS archived -- so a file that survives with `_archived False` is
+        # genuinely ours and genuinely ahead of the store.
+        local_is_newer = (
+            self._sid == resume and not self._archived and self._local.path(resume).exists()
+        )
+        hydrated = False
+        if not local_is_newer:
+            data = await self._transcripts.load(self._channel, self._thread_ts, resume)
+            if data is not None:
+                self._local.write(resume, data)
+                hydrated = True
         try:
             return await self._open(resume)
         except Exception:
+            # The resume was refused, so the file we just materialized for it is
+            # useless -- and it is the store's copy, not ours, so dropping it
+            # loses nothing. Leave a file we did NOT write alone: it would be the
+            # only copy of an un-archived transcript.
+            if hydrated:
+                self._local.delete(resume)
             client = await self._open(None)
         await self._chat.reply(
             self._channel,
@@ -128,7 +148,16 @@ class JeanSession:
         return client
 
     async def _archive(self, sdk_session_id: str) -> None:
-        """Copy this pod's transcript into the store so any worker can resume it."""
+        """Copy this pod's transcript into the store so any worker can resume it.
+
+        `_archived` means "the store's copy is up to date with our local file for
+        `_sid`", and close() reads it to decide whether deleting that local file is
+        safe. So it must be cleared here, up front, before any path that returns
+        without a successful save(): otherwise a `True` left over from an earlier
+        turn's archive outlives the turn it described, and close() deletes a file
+        the store never took -- rewinding the thread to the last archived turn.
+        """
+        self._sid, self._archived = sdk_session_id, False
         data = self._local.read(sdk_session_id)
         if data is None:
             return
@@ -144,12 +173,11 @@ class JeanSession:
             return
         try:
             await self._transcripts.save(self._channel, self._thread_ts, sdk_session_id, data)
-            self._sid, self._archived = sdk_session_id, True
+            self._archived = True
         except Exception:
             # The turn already succeeded and the user has their answer; failing it
             # now would help no one. Log loudly and keep the local file as the only
             # copy (close() will not delete an unarchived transcript).
-            self._archived = False
             logger.exception(
                 "failed to archive transcript for %s/%s", self._channel, self._thread_ts
             )
@@ -181,8 +209,28 @@ class JeanSession:
                         self._channel, self._thread_ts, sdk_session_id=sid
                     )
             if sid is not None:
-                await self._archive(sid)
+                # Bump BEFORE archiving. The order is load-bearing, not tidiness:
+                # these are two separate statements and a connection can drop
+                # between them, and the two orders fail in opposite directions.
+                #
+                #   archive-then-bump: save() lands, bump_turn() fails -> the store
+                #     holds the NEW transcript under an OLD turn_seq. Another
+                #     worker's cached client still matches that turn_seq, so it
+                #     believes it is current, answers from a history missing this
+                #     turn, and archives that over the good transcript. Two
+                #     divergent histories: corruption.
+                #
+                #   bump-then-archive (this): bump_turn() lands, save() fails ->
+                #     the store holds an OLD transcript under a NEW turn_seq. Every
+                #     other worker notices the change, drops its cached client and
+                #     re-hydrates a coherent -- if one turn older -- history, while
+                #     this worker keeps the newer local file (close() never deletes
+                #     an un-archived one) and heals the store on its next turn.
+                #     At worst one turn is lost.
+                #
+                # Losing a turn is recoverable; a corrupted thread is not.
                 self._seen_seq = await self._store.bump_turn(self._channel, self._thread_ts)
+                await self._archive(sid)
         except BaseException:
             # Never leave a poisoned, non-None, un-entered client around: if
             # client creation or any step of the turn raised, every later turn

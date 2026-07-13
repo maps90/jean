@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import contextlib
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from jean.ports import ChatSurface, SessionStore
+from jean.ports import ChatSurface, SessionStore, TranscriptStore
+from jean.session.transcript import LocalTranscripts
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -27,6 +31,14 @@ class JeanSession:
     SessionStore after every turn, so if this instance (or its cached client)
     is ever dropped, the next `run_turn` (here or on another worker) resumes
     from the stored id (the stateless-worker model).
+
+    The CLI keeps a thread's transcript on the *local* disk of whichever pod
+    wrote it, though, so a cached client is not enough: this class also
+    hydrates that transcript from the TranscriptStore before a cold connect,
+    and archives it back after every turn, so any worker can pick the thread
+    up. A `turn_seq` counter on the session row guards a cached client against
+    silently going stale when another worker took a turn in between (see
+    `run_turn`).
     """
 
     def __init__(
@@ -39,6 +51,9 @@ class JeanSession:
         routing: RoutingContext,
         options_factory: Callable[[str | None], Any],
         client_factory: Callable[..., Any],
+        transcripts: TranscriptStore,
+        local: LocalTranscripts,
+        max_transcript_bytes: int = 32 * 1024 * 1024,
     ) -> None:
         self._channel = channel
         self._thread_ts = thread_ts
@@ -47,7 +62,13 @@ class JeanSession:
         self._routing = routing
         self._options_factory = options_factory
         self._client_factory = client_factory
+        self._transcripts = transcripts
+        self._local = local
+        self._max_transcript_bytes = max_transcript_bytes
         self._client: Any | None = None
+        self._seen_seq: int = 0  # turn_seq this instance's client is current with
+        self._sid: str | None = None  # session id its transcript is stored under
+        self._archived = False  # is the store's copy up to date with local disk?
 
     async def _open(self, resume: str | None) -> Any:
         options = self._options_factory(resume)
@@ -67,7 +88,14 @@ class JeanSession:
         conversation to the *local* filesystem ($HOME/.claude/projects/<cwd>/
         <id>.jsonl) while jean persists only the id in Postgres, so a restarted
         pod -- or any other replica -- resumes an id it cannot see and the CLI
-        exits 1 during startup, before the turn even begins. Rather than fail
+        exits 1 during startup, before the turn even begins. This worker may
+        simply never have handled this thread before, though, so before
+        attempting the resume we materialize Postgres's copy of the transcript
+        onto our own disk -- that is the common case under N>1 workers, and it
+        is what makes the resume succeed instead of silently starting fresh.
+
+        Only if the transcript is genuinely gone (e.g. expired by retention,
+        or this is the very first turn) does the resume fail. Rather than fail
         the user's message, reconnect without `resume`: the thread keeps
         working, having lost the agent's memory of its earlier turns (the next
         ResultMessage overwrites the unusable id in the store).
@@ -80,8 +108,13 @@ class JeanSession:
         """
         row = await self._store.get_session(self._channel, self._thread_ts)
         resume = row.sdk_session_id if row else None
+        self._seen_seq = row.turn_seq if row else 0
         if resume is None:
             return await self._open(None)
+
+        data = await self._transcripts.load(self._channel, self._thread_ts, resume)
+        if data is not None:
+            self._local.write(resume, data)
         try:
             return await self._open(resume)
         except Exception:
@@ -94,21 +127,62 @@ class JeanSession:
         )
         return client
 
+    async def _archive(self, sdk_session_id: str) -> None:
+        """Copy this pod's transcript into the store so any worker can resume it."""
+        data = self._local.read(sdk_session_id)
+        if data is None:
+            return
+        if len(data) > self._max_transcript_bytes:
+            logger.warning(
+                "transcript for %s/%s is %d bytes (> max %d); not archiving -- this "
+                "thread will not resume on another worker",
+                self._channel,
+                self._thread_ts,
+                len(data),
+                self._max_transcript_bytes,
+            )
+            return
+        try:
+            await self._transcripts.save(self._channel, self._thread_ts, sdk_session_id, data)
+            self._sid, self._archived = sdk_session_id, True
+        except Exception:
+            # The turn already succeeded and the user has their answer; failing it
+            # now would help no one. Log loudly and keep the local file as the only
+            # copy (close() will not delete an unarchived transcript).
+            self._archived = False
+            logger.exception(
+                "failed to archive transcript for %s/%s", self._channel, self._thread_ts
+            )
+
     async def run_turn(self, text: str) -> None:
         self._routing.channel = self._channel
         self._routing.thread_ts = self._thread_ts
         await self._chat.set_status(self._channel, self._thread_ts, "is thinking...")
         try:
+            if self._client is not None:
+                # Another worker may have taken a turn on this thread since we
+                # cached this client. A cached client never re-reads the store,
+                # so it would answer from a history missing that turn and
+                # archive over it. The stored turn_seq is how we notice.
+                row = await self._store.get_session(self._channel, self._thread_ts)
+                if row is None or row.turn_seq != self._seen_seq:
+                    await self.close()
+
             if self._client is None:
                 self._client = await self._connect()
 
+            sid: str | None = None
             await self._client.query(text)
             async for msg in self._client.receive_response():
-                sid = getattr(msg, "session_id", None)
-                if sid:
+                got = getattr(msg, "session_id", None)
+                if got:
+                    sid = got
                     await self._store.upsert_session(
                         self._channel, self._thread_ts, sdk_session_id=sid
                     )
+            if sid is not None:
+                await self._archive(sid)
+                self._seen_seq = await self._store.bump_turn(self._channel, self._thread_ts)
         except BaseException:
             # Never leave a poisoned, non-None, un-entered client around: if
             # client creation or any step of the turn raised, every later turn
@@ -129,3 +203,9 @@ class JeanSession:
         if self._client is not None:
             await self._client.__aexit__(None, None, None)
             self._client = None
+        # Postgres is the durable copy, so a pod need not hoard transcripts for
+        # threads it is no longer serving -- but never delete one the store failed
+        # to take.
+        if self._archived and self._sid is not None:
+            self._local.delete(self._sid)
+            self._archived = False

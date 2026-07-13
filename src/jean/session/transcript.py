@@ -3,6 +3,12 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+# Every turn the CLI completes ends with an `assistant` record -- even one whose
+# visible output came out of a tool. Counting the marker in the raw bytes is
+# deliberate: JeanSession polls this while waiting for a turn to land on disk, so
+# it must stay a single read with no JSON parsing.
+_ASSISTANT_RECORD = b'"type":"assistant"'
+
 
 class LocalTranscripts:
     """The claude CLI's transcript files on *this* pod's disk.
@@ -32,6 +38,27 @@ class LocalTranscripts:
         if not path.exists():
             return None
         return path.read_bytes()
+
+    def assistant_records(self, sdk_session_id: str) -> int:
+        """How many `assistant` records the transcript holds; 0 when there is no file.
+
+        A turn's answer is on disk once this count has risen -- that is the signal
+        JeanSession waits for before archiving (the CLI's writes lag the response by
+        ~0.5s). Records, never text: a turn that answered through a tool still ends
+        in an `assistant` record but need not carry the user's words.
+        """
+        data = self.read(sdk_session_id)
+        if data is None:
+            return 0
+        return data.count(_ASSISTANT_RECORD)
+
+    def size(self, sdk_session_id: str) -> int:
+        """Bytes currently on disk; 0 when there is no file. A size that stops
+        changing is how JeanSession knows the CLI has stopped writing."""
+        try:
+            return self.path(sdk_session_id).stat().st_size
+        except FileNotFoundError:
+            return 0
 
     def write(self, sdk_session_id: str, data: bytes) -> None:
         path = self.path(sdk_session_id)

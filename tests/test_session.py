@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import asyncio
+import logging
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -14,6 +17,13 @@ from jean.session.transcript import LocalTranscripts
 # so there is no default to fall back on -- tests that don't care about the cap pass
 # the production value.
 MAX_TRANSCRIPT_BYTES = 32 * 1024 * 1024
+
+# The settle wait before archiving is real time, so tests that reach it drive it fast
+# (its production defaults are seconds). Tests whose fake client never writes a
+# transcript never reach it at all -- there is no file to settle -- and the ones whose
+# fake writes a transcript with no `assistant` record in it wait out this timeout and
+# archive anyway, which is exactly the behaviour they already assert.
+FAST_SETTLE = {"settle_timeout": 0.05, "settle_interval": 0.005}
 
 
 @dataclass
@@ -366,6 +376,8 @@ async def test_connect_failure_unrelated_to_resume_propagates(tmp_path: Path):
 
 def _session(store, chat, factory, local, **kw):
     kw.setdefault("max_transcript_bytes", MAX_TRANSCRIPT_BYTES)
+    for k, v in FAST_SETTLE.items():
+        kw.setdefault(k, v)
     return JeanSession(
         "C1",
         "111.0",
@@ -475,6 +487,7 @@ async def test_local_transcript_is_kept_when_archiving_fails(tmp_path: Path):
         transcripts=BrokenTranscripts(),
         local=local,
         max_transcript_bytes=MAX_TRANSCRIPT_BYTES,
+        **FAST_SETTLE,
     )
 
     class WritingClient(FakeSdkClient):
@@ -807,3 +820,126 @@ async def test_close_survives_a_client_whose_teardown_raises(tmp_path: Path):
 
     await session.close()
     assert session._client is None  # dropped even though __aexit__ raised
+
+
+def _write_behind_client_factory(local: LocalTranscripts, delay: float, answer: bytes):
+    """A client that writes its transcript the way the real CLI does: the *user*
+    record lands during query(), but the *assistant* record only appears on disk
+    some time AFTER receive_response() has returned (measured against the real CLI:
+    ~0.5s). Archiving the moment the response ends therefore persists a transcript
+    whose last turn has no answer in it."""
+
+    tasks: list[asyncio.Task] = []
+
+    class WriteBehindClient(FakeSdkClient):
+        async def query(self, text: str) -> None:
+            await super().query(text)
+            local.write(
+                "sdk-session-abc", (local.read("sdk-session-abc") or b"") + b'{"type":"user"}\n'
+            )
+
+            async def _flush_later() -> None:
+                await asyncio.sleep(delay)
+                local.write(
+                    "sdk-session-abc",
+                    (local.read("sdk-session-abc") or b"")
+                    + b'{"type":"assistant","text":"'
+                    + answer
+                    + b'"}\n',
+                )
+
+            tasks.append(asyncio.create_task(_flush_later()))
+
+    def factory(*, options):
+        return WriteBehindClient(options=options)
+
+    return factory, tasks
+
+
+async def test_archive_waits_for_the_cli_to_flush_this_turn_s_answer(tmp_path: Path):
+    """The CLI's transcript writes are write-behind: when receive_response() returns
+    the user has their answer but the assistant record is not on disk yet. Archiving
+    right then stores a transcript that ends on a dangling user message -- a cold
+    worker hydrates it, the CLI injects "Continue from where you left off.", and the
+    answer is gone from the durable copy forever. So wait for the file to settle."""
+    FakeSdkClient.instances.clear()
+    store, chat = MemoryStore(), FakeChat()
+    local = LocalTranscripts(cli_home=tmp_path, cwd=Path("/w"))
+    factory, tasks = _write_behind_client_factory(local, delay=0.05, answer=b"BANANA")
+
+    # a real settle budget: the point is that the wait OUTLASTS the CLI's write-behind
+    session = _session(store, chat, factory, local, settle_timeout=5.0, settle_interval=0.01)
+
+    await session.run_turn("say BANANA")
+
+    stored = await store.load("C1", "111.0", "sdk-session-abc")
+    assert stored is not None
+    assert b'"type":"assistant"' in stored, "archived before the CLI wrote the answer"
+    assert b"BANANA" in stored
+    await asyncio.gather(*tasks)  # already done -- the settle wait outlives them
+
+
+async def test_second_turn_waits_for_its_own_answer_not_the_previous_one(tmp_path: Path):
+    """The settle wait is against a BASELINE taken before query(): turn 2 must wait
+    for turn 2's assistant record, not be satisfied by turn 1's, which is already on
+    disk when it starts."""
+    FakeSdkClient.instances.clear()
+    store, chat = MemoryStore(), FakeChat()
+    local = LocalTranscripts(cli_home=tmp_path, cwd=Path("/w"))
+    factory, tasks = _write_behind_client_factory(local, delay=0.05, answer=b"BANANA")
+
+    # a real settle budget: the point is that the wait OUTLASTS the CLI's write-behind
+    session = _session(store, chat, factory, local, settle_timeout=5.0, settle_interval=0.01)
+
+    await session.run_turn("say BANANA")
+    await session.run_turn("say BANANA again")
+
+    stored = await store.load("C1", "111.0", "sdk-session-abc")
+    assert stored is not None
+    assert stored.count(b'"type":"assistant"') == 2, "turn 2's answer is missing"
+    assert stored.count(b'"type":"user"') == 2
+    await asyncio.gather(*tasks)
+
+
+async def test_archive_happens_anyway_and_warns_when_the_transcript_never_settles(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+):
+    """If the answer never lands on disk, archive what IS there -- an incomplete
+    transcript still beats none, and the user already has their answer -- but say so
+    loudly. Never fail the turn over it, never swallow it."""
+    FakeSdkClient.instances.clear()
+    store, chat = MemoryStore(), FakeChat()
+    local = LocalTranscripts(cli_home=tmp_path, cwd=Path("/w"))
+    content: dict[str, bytes | None] = {"data": b'{"type":"user"}\n'}  # no assistant record, ever
+    factory, _calls = _writing_client_factory(local, content)
+
+    session = _session(store, chat, factory, local)
+
+    with caplog.at_level(logging.WARNING, logger="jean.session.session"):
+        await session.run_turn("hello")  # must not raise
+
+    assert await store.load("C1", "111.0", "sdk-session-abc") == b'{"type":"user"}\n'
+    assert any(
+        "transcript" in r.message and "last turn" in r.message
+        for r in caplog.records
+        if r.levelno >= logging.WARNING
+    ), f"expected a loud warning, got {[r.message for r in caplog.records]}"
+
+
+async def test_settle_wait_does_not_fire_when_there_is_no_local_transcript(tmp_path: Path):
+    """Nothing on disk = nothing to settle (a misconfigured cli_home, say). Waiting
+    out the full timeout on every turn of a thread that will never have a file would
+    add seconds to each of them; _archive's own warning covers that case."""
+    FakeSdkClient.instances.clear()
+    store, chat = MemoryStore(), FakeChat()
+    local = LocalTranscripts(cli_home=tmp_path, cwd=Path("/w"))
+    factory, _calls = _client_factory()  # writes no transcript at all
+
+    session = _session(store, chat, factory, local, settle_timeout=30.0, settle_interval=1.0)
+
+    started = time.monotonic()
+    await session.run_turn("hello")
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 1.0, "run_turn sat in the settle wait with no file to wait for"
+    assert local.read("sdk-session-abc") is None

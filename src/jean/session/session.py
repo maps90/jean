@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
 from collections.abc import Callable
@@ -54,6 +55,8 @@ class JeanSession:
         transcripts: TranscriptStore,
         local: LocalTranscripts,
         max_transcript_bytes: int,  # no default: Settings.transcript_max_mb owns the number
+        settle_timeout: float = 5.0,
+        settle_interval: float = 0.1,
     ) -> None:
         self._channel = channel
         self._thread_ts = thread_ts
@@ -65,9 +68,12 @@ class JeanSession:
         self._transcripts = transcripts
         self._local = local
         self._max_transcript_bytes = max_transcript_bytes
+        self._settle_timeout = settle_timeout
+        self._settle_interval = settle_interval
         self._client: Any | None = None
         self._seen_seq: int = 0  # turn_seq this instance's client is current with
         self._sid: str | None = None  # session id its transcript is stored under
+        self._live_sid: str | None = None  # id of the .jsonl the OPEN client writes to
         self._archived = False  # is the store's copy up to date with local disk?
         self._busy = False  # is a turn in flight? (the idle sweeper must not close us)
 
@@ -121,6 +127,7 @@ class JeanSession:
         resume = row.sdk_session_id if row else None
         self._seen_seq = row.turn_seq if row else 0
         if resume is None:
+            self._live_sid = None  # a fresh session writes a .jsonl we cannot name yet
             return await self._open(None)
 
         # ... unless OUR local file is the newer copy. `_archived is False` for
@@ -154,7 +161,7 @@ class JeanSession:
             if data is not None:
                 self._local.write(resume, data)
         try:
-            return await self._open(resume)
+            client = await self._open(resume)
         except Exception:
             client = await self._open(None)
             # Only now do we know the resume id itself was refused: a failure that
@@ -166,6 +173,12 @@ class JeanSession:
             # the CLI has told us that copy cannot be resumed, and leaving it
             # orphans it on this pod's disk forever.
             self._local.delete(resume)
+            self._live_sid = None  # a fresh session: a new .jsonl under a new id
+        else:
+            # The resumed transcript is the file this client appends to, so run_turn's
+            # settle wait measures its growth against the records already in it.
+            self._live_sid = resume
+            return client
         await self._chat.reply(
             self._channel,
             self._thread_ts,
@@ -173,6 +186,52 @@ class JeanSession:
             "my memory of the earlier turns is gone. Starting fresh.)_",
         )
         return client
+
+    async def _settle(self, sdk_session_id: str, baseline: int) -> None:
+        """Wait for the CLI to finish writing this turn to its .jsonl.
+
+        The CLI's transcript writes are write-behind: when `receive_response()`
+        returns, the user has their answer but the assistant record for this turn is
+        typically NOT on disk yet (measured against the real CLI: it catches up on
+        its own ~0.5s later, without the client being closed). Archiving at that
+        moment persists a transcript whose last turn is a dangling user message --
+        and it is silent: a cold worker hydrates that copy, the CLI sees a user turn
+        with no answer, injects a "Continue from where you left off." turn of its
+        own, and the real answer is gone from the durable copy forever.
+
+        So poll until the file has settled: (a) the turn's `assistant` record has
+        landed -- the count has risen above the BASELINE taken before query(), so
+        THIS turn's answer is what we wait for, not one already on disk when it
+        started -- and (b) the size has stopped changing, so the records the CLI
+        trails after it (`last-prompt`) land too.
+
+        Bounded: if the timeout expires we archive what is there anyway (an
+        incomplete transcript still beats none) and say so loudly. The user already
+        has their answer; the turn is never failed over this.
+        """
+        if not self._local.path(sdk_session_id).exists():
+            return  # nothing on disk to settle -- _archive logs that as its own problem
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self._settle_timeout
+        last_size = -1  # no size seen yet, so the first poll can never look "unchanged"
+        while True:
+            size = self._local.size(sdk_session_id)
+            if size == last_size and self._local.assistant_records(sdk_session_id) > baseline:
+                return
+            if loop.time() >= deadline:
+                logger.warning(
+                    "transcript for %s/%s did not settle within %.1fs (%d assistant "
+                    "records, baseline %d) -- archiving it anyway, but it may be missing "
+                    "this last turn; a worker that resumes it would lose the answer",
+                    self._channel,
+                    self._thread_ts,
+                    self._settle_timeout,
+                    self._local.assistant_records(sdk_session_id),
+                    baseline,
+                )
+                return
+            last_size = size
+            await asyncio.sleep(self._settle_interval)
 
     async def _archive(self, sdk_session_id: str) -> None:
         """Copy this pod's transcript into the store so any worker can resume it.
@@ -249,11 +308,17 @@ class JeanSession:
             # writes anything merely leaves the flag False over a local file that is
             # still identical to the store's -- harmless: we re-archive next turn.
             self._archived = False
+            # How many answers the transcript holds BEFORE this turn: 0 on a fresh
+            # session (no file yet), the hydrated count on a resumed one. _settle waits
+            # for this to rise, which is what tells it THIS turn's answer is on disk
+            # rather than one that was already there when the turn started.
+            baseline = self._local.assistant_records(self._live_sid) if self._live_sid else 0
             await self._client.query(text)
             async for msg in self._client.receive_response():
                 got = getattr(msg, "session_id", None)
                 if got:
                     sid = got
+                    self._live_sid = sid  # now we can name the file the CLI is writing
                     await self._store.upsert_session(
                         self._channel, self._thread_ts, sdk_session_id=sid
                     )
@@ -279,6 +344,9 @@ class JeanSession:
                 #
                 # Losing a turn is recoverable; a corrupted thread is not.
                 self._seen_seq = await self._store.bump_turn(self._channel, self._thread_ts)
+                # ... but archive nothing until the CLI has actually written this turn:
+                # its .jsonl lags the response we have just finished streaming (_settle).
+                await self._settle(sid, baseline)
                 await self._archive(sid)
         except BaseException:
             # Never leave a poisoned, non-None, un-entered client around: if

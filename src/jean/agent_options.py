@@ -7,7 +7,7 @@ from claude_agent_sdk import ClaudeAgentOptions, PermissionResultAllow
 
 from jean.config import Settings
 from jean.persona.identity import DEFAULT_AGENT_NAME, compose_system_prompt
-from jean.plugins.mcp_config import extra_mcp_tool_patterns, plugin_tool_patterns
+from jean.plugins.mcp_proxy import proxy_tool_patterns
 from jean.ports import ResolvedPlugin
 
 logger = logging.getLogger(__name__)
@@ -40,20 +40,20 @@ def build_agent_options(
     persona_text: str,
     slack_server: Any,
     slack_tool_names: list[str],
-    extra_mcp: dict[str, Any],
+    mcp_servers: dict[str, Any],
     plugins: list[ResolvedPlugin],
     settings: Settings,
     resume: str | None,
     agent_name: str = DEFAULT_AGENT_NAME,
 ) -> ClaudeAgentOptions:
+    """`mcp_servers` are jean's in-process proxies (plugins/mcp_proxy.py) plus any
+    remote http servers -- never a stdio config. A stdio entry here would have the
+    CLI fork its own copy of that server for every session, which is what the
+    proxy exists to prevent."""
     return ClaudeAgentOptions(
         system_prompt=compose_system_prompt(persona_text, name=agent_name),
-        mcp_servers={"jean_slack": slack_server, **extra_mcp},
-        allowed_tools=[
-            *slack_tool_names,
-            *extra_mcp_tool_patterns(extra_mcp),
-            *plugin_tool_patterns(plugins),
-        ],
+        mcp_servers={"jean_slack": slack_server, **mcp_servers},
+        allowed_tools=[*slack_tool_names, *proxy_tool_patterns(mcp_servers)],
         plugins=[{"type": "local", "path": p.path} for p in plugins],
         skills="all",
         strict_mcp_config=False,

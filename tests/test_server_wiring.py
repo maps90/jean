@@ -117,7 +117,15 @@ def test_build_local_transcripts_matches_agent_cwd(tmp_path):
 
 
 def test_build_session_factory_wires_transcript_store_and_local(tmp_path):
-    settings = _make_settings(tmp_path, transcript_max_mb=7)
+    settings = _make_settings(
+        tmp_path,
+        transcript_max_mb=7,
+        # deliberately NOT the field defaults: the settle wait guards against archiving
+        # a turn the CLI has not finished writing, and it must be tunable in production
+        settle_timeout=11.0,
+        settle_interval=0.25,
+        settle_quiet=2.5,
+    )
     store = FakeStore()
     local = server.build_local_transcripts(settings)
 
@@ -143,6 +151,11 @@ def test_build_session_factory_wires_transcript_store_and_local(tmp_path):
     assert session._transcripts is store
     assert session._local is local
     assert session._max_transcript_bytes == 7 * 1024 * 1024
+    assert (session._settle_timeout, session._settle_interval, session._settle_quiet) == (
+        11.0,
+        0.25,
+        2.5,
+    )
 
 
 async def test_build_cleanup_scheduler_uses_settings_retention_and_interval(tmp_path):

@@ -60,6 +60,7 @@ Copy `.env.example` to `.env` and fill in:
 | `JEAN_APPROVAL_RETENTION_DAYS` | no | delete resolved approvals older than this (default: `30`) — the audit trail outlives the memory. Pending approvals are never pruned. |
 | `JEAN_CLEANUP_INTERVAL_HOURS` | no | how often the sweep runs (default: `24`) |
 | `JEAN_TRANSCRIPT_MAX_MB` | no | refuse to archive a transcript bigger than this (default: `32`), rather than let one pathological thread bloat the database. That thread keeps working, but only on the worker holding it — it won't resume elsewhere. |
+| `JEAN_SETTLE_QUIET`, `JEAN_SETTLE_INTERVAL`, `JEAN_SETTLE_TIMEOUT` | no | the CLI writes a turn to its transcript *write-behind*, so jean waits for the file to stop changing before archiving it (defaults, in seconds: `1.0` of quiet, sampled every `0.1`, capped at `10.0`). Too short a quiet window archives a turn whose answer the CLI has not written yet — a cold worker then resumes a hole. |
 
 Exactly one of `ANTHROPIC_API_KEY` / `CLAUDE_CODE_OAUTH_TOKEN` must be set --
 these two are the only unprefixed env vars, everything else is `JEAN_*`.

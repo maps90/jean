@@ -21,14 +21,23 @@ MAX_TRANSCRIPT_BYTES = 32 * 1024 * 1024
 # The settle wait before archiving is real time, so tests that reach it drive it fast
 # (its production defaults are seconds). Tests whose fake client never writes a
 # transcript never reach it at all -- there is no file to settle -- and the ones whose
-# fake writes a transcript with no `assistant` record in it wait out this timeout and
-# archive anyway, which is exactly the behaviour they already assert.
-FAST_SETTLE = {"settle_timeout": 0.05, "settle_interval": 0.005}
+# fake streams no AssistantMessage owe the .jsonl no `assistant` record, so they settle
+# as soon as the file has been quiet for `settle_quiet`.
+FAST_SETTLE = {"settle_timeout": 0.05, "settle_interval": 0.002, "settle_quiet": 0.004}
 
 
 @dataclass
 class FakeResultMessage:
     session_id: str
+
+
+class AssistantMessage:
+    """Stands in for claude_agent_sdk.AssistantMessage -- deliberately under the SDK's
+    own class name, because the NAME is what JeanSession matches on. The SDK streams
+    exactly one of these per `assistant` record the CLI writes to the .jsonl, and
+    run_turn counts them STRUCTURALLY (by class name) to know how many records this
+    turn still owes the transcript: session/ is domain code and may not import the SDK
+    (CLAUDE.md's layering rule)."""
 
 
 class FakeSdkClient:
@@ -822,83 +831,120 @@ async def test_close_survives_a_client_whose_teardown_raises(tmp_path: Path):
     assert session._client is None  # dropped even though __aexit__ raised
 
 
-def _write_behind_client_factory(local: LocalTranscripts, delay: float, answer: bytes):
-    """A client that writes its transcript the way the real CLI does: the *user*
-    record lands during query(), but the *assistant* record only appears on disk
-    some time AFTER receive_response() has returned (measured against the real CLI:
-    ~0.5s). Archiving the moment the response ends therefore persists a transcript
-    whose last turn has no answer in it."""
+def _tool_turn_client_factory(local: LocalTranscripts, delay: float, answer: bytes):
+    """A client that writes its transcript the way the real CLI does on a real jean
+    turn -- and a real jean turn is a TOOL turn: persona/identity.py mandates that
+    every visible reply goes out through `mcp__jean_slack__reply`, so the CLI emits
+    SEVERAL `assistant` records per turn (a tool_use, then the final text), not one.
+
+    The shapes that matter, measured against the real CLI:
+      - the `user` record and the `assistant`/tool_use record are flushed EARLY --
+        already on disk BEFORE receive_response() returns;
+      - the final `assistant`/text record is flushed LATE, ~0.5s afterwards.
+
+    So "the assistant count has risen above the baseline" is ALREADY TRUE when the
+    response ends, satisfied by the tool_use record, while the answer is still
+    unwritten: settling on that archives a truncated history whose last turn ends on
+    an unresolved tool_use. The SDK streams one AssistantMessage per on-disk
+    `assistant` record, so the exact target is `baseline + streamed`."""
 
     tasks: list[asyncio.Task] = []
 
-    class WriteBehindClient(FakeSdkClient):
+    def _append(chunk: bytes) -> None:
+        local.write("sdk-session-abc", (local.read("sdk-session-abc") or b"") + chunk)
+
+    class ToolTurnClient(FakeSdkClient):
         async def query(self, text: str) -> None:
             await super().query(text)
-            local.write(
-                "sdk-session-abc", (local.read("sdk-session-abc") or b"") + b'{"type":"user"}\n'
-            )
+            # flushed while the turn is still streaming
+            _append(b'{"type":"user"}\n')
+            _append(b'{"type":"assistant","tool_use":"mcp__jean_slack__reply"}\n')
+            _append(b'{"type":"user","tool_result":"ok"}\n')
 
             async def _flush_later() -> None:
                 await asyncio.sleep(delay)
-                local.write(
-                    "sdk-session-abc",
-                    (local.read("sdk-session-abc") or b"")
-                    + b'{"type":"assistant","text":"'
-                    + answer
-                    + b'"}\n',
-                )
+                _append(b'{"type":"assistant","text":"' + answer + b'"}\n')
+                await asyncio.sleep(delay / 2)
+                _append(b'{"type":"system","subtype":"post-turn"}\n')  # trails the answer
 
             tasks.append(asyncio.create_task(_flush_later()))
 
+        async def receive_response(self):
+            # one AssistantMessage per `assistant` record the CLI will write
+            yield AssistantMessage()  # the tool_use
+            yield AssistantMessage()  # the final answer
+            yield FakeResultMessage(session_id="sdk-session-abc")
+
     def factory(*, options):
-        return WriteBehindClient(options=options)
+        return ToolTurnClient(options=options)
 
     return factory, tasks
 
 
-async def test_archive_waits_for_the_cli_to_flush_this_turn_s_answer(tmp_path: Path):
-    """The CLI's transcript writes are write-behind: when receive_response() returns
-    the user has their answer but the assistant record is not on disk yet. Archiving
-    right then stores a transcript that ends on a dangling user message -- a cold
-    worker hydrates it, the CLI injects "Continue from where you left off.", and the
-    answer is gone from the durable copy forever. So wait for the file to settle."""
+async def test_archive_waits_for_the_cli_to_flush_this_turn_s_final_answer(tmp_path: Path):
+    """The CLI's transcript writes are write-behind, and a real turn writes several
+    `assistant` records: the tool_use lands before receive_response() returns, the
+    final text lands ~0.5s after. Archiving as soon as the count exceeds the baseline
+    is therefore satisfied by the TOOL CALL and stores a history with no answer in it
+    -- a cold worker hydrates that, the CLI injects "Continue from where you left
+    off.", and the answer is gone from the durable copy forever."""
     FakeSdkClient.instances.clear()
     store, chat = MemoryStore(), FakeChat()
     local = LocalTranscripts(cli_home=tmp_path, cwd=Path("/w"))
-    factory, tasks = _write_behind_client_factory(local, delay=0.05, answer=b"BANANA")
+    factory, tasks = _tool_turn_client_factory(local, delay=0.05, answer=b"BANANA")
 
     # a real settle budget: the point is that the wait OUTLASTS the CLI's write-behind
-    session = _session(store, chat, factory, local, settle_timeout=5.0, settle_interval=0.01)
+    session = _session(
+        store, chat, factory, local, settle_timeout=5.0, settle_interval=0.01, settle_quiet=0.05
+    )
 
     await session.run_turn("say BANANA")
 
     stored = await store.load("C1", "111.0", "sdk-session-abc")
     assert stored is not None
-    assert b'"type":"assistant"' in stored, "archived before the CLI wrote the answer"
-    assert b"BANANA" in stored
+    assert b"BANANA" in stored, "archived before the CLI wrote this turn's final answer"
+    # both assistant records -- not just the tool_use that lands early
+    assert stored.count(b'"type":"assistant"') == 2
     await asyncio.gather(*tasks)  # already done -- the settle wait outlives them
 
 
 async def test_second_turn_waits_for_its_own_answer_not_the_previous_one(tmp_path: Path):
-    """The settle wait is against a BASELINE taken before query(): turn 2 must wait
-    for turn 2's assistant record, not be satisfied by turn 1's, which is already on
-    disk when it starts."""
+    """The settle target is BASELINE + the assistant messages streamed this turn, and
+    the baseline is taken before query(): turn 2 must wait for turn 2's own records,
+    not be satisfied by turn 1's, which are already on disk when it starts."""
     FakeSdkClient.instances.clear()
     store, chat = MemoryStore(), FakeChat()
     local = LocalTranscripts(cli_home=tmp_path, cwd=Path("/w"))
-    factory, tasks = _write_behind_client_factory(local, delay=0.05, answer=b"BANANA")
+    factory, tasks = _tool_turn_client_factory(local, delay=0.05, answer=b"BANANA")
 
-    # a real settle budget: the point is that the wait OUTLASTS the CLI's write-behind
-    session = _session(store, chat, factory, local, settle_timeout=5.0, settle_interval=0.01)
+    session = _session(
+        store, chat, factory, local, settle_timeout=5.0, settle_interval=0.01, settle_quiet=0.05
+    )
 
     await session.run_turn("say BANANA")
     await session.run_turn("say BANANA again")
 
     stored = await store.load("C1", "111.0", "sdk-session-abc")
     assert stored is not None
-    assert stored.count(b'"type":"assistant"') == 2, "turn 2's answer is missing"
-    assert stored.count(b'"type":"user"') == 2
+    assert stored.count(b'"type":"assistant"') == 4, "turn 2's final answer is missing"
+    assert stored.count(b"BANANA") == 2
     await asyncio.gather(*tasks)
+
+
+def _never_flushing_client_factory(local: LocalTranscripts):
+    """A client whose turn streams an AssistantMessage the CLI never gets around to
+    writing: the transcript keeps its `user` record and nothing else, forever."""
+
+    class NeverFlushingClient(FakeSdkClient):
+        async def query(self, text: str) -> None:
+            await super().query(text)
+            local.write("sdk-session-abc", b'{"type":"user"}\n')
+
+        async def receive_response(self):
+            yield AssistantMessage()
+            yield FakeResultMessage(session_id="sdk-session-abc")
+
+    return lambda *, options: NeverFlushingClient(options=options)
 
 
 async def test_archive_happens_anyway_and_warns_when_the_transcript_never_settles(
@@ -910,8 +956,7 @@ async def test_archive_happens_anyway_and_warns_when_the_transcript_never_settle
     FakeSdkClient.instances.clear()
     store, chat = MemoryStore(), FakeChat()
     local = LocalTranscripts(cli_home=tmp_path, cwd=Path("/w"))
-    content: dict[str, bytes | None] = {"data": b'{"type":"user"}\n'}  # no assistant record, ever
-    factory, _calls = _writing_client_factory(local, content)
+    factory = _never_flushing_client_factory(local)
 
     session = _session(store, chat, factory, local)
 

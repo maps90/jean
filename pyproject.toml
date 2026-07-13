@@ -10,7 +10,7 @@ dependencies = [
     "aiohttp>=3.9",
     "asyncpg>=0.29",
     "pydantic>=2.6",
-    "pydantic-settings>=2.2",
+    "pydantic-settings>=2.3",
     "PyYAML>=6.0",
 ]
 

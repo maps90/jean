@@ -88,7 +88,7 @@ async def test_run_turn_persists_session_id_and_sets_status():
         store=store,
         chat=chat,
         routing=routing,
-        options_factory=lambda resume: {"resume": resume},
+        options_factory=lambda resume, mode=None: {"resume": resume, "mode": mode},
         client_factory=factory,
     )
 
@@ -96,7 +96,7 @@ async def test_run_turn_persists_session_id_and_sets_status():
 
     row = await store.get_session("C1", "111.0")
     assert row.sdk_session_id == "sdk-session-abc"
-    assert calls[0]["options"] == {"resume": None}  # first turn: nothing to resume
+    assert calls[0]["options"]["resume"] is None  # first turn: nothing to resume
     assert routing.channel == "C1"
     assert routing.thread_ts == "111.0"
     assert ("C1", "111.0", "is thinking...") in chat.statuses
@@ -115,7 +115,7 @@ async def test_run_turn_reuses_the_connected_client_across_turns():
         store=store,
         chat=chat,
         routing=routing,
-        options_factory=lambda resume: {"resume": resume},
+        options_factory=lambda resume, mode=None: {"resume": resume, "mode": mode},
         client_factory=factory,
     )
 
@@ -142,11 +142,11 @@ async def test_second_turn_on_a_fresh_session_resumes_stored_id():
         store=store,
         chat=chat,
         routing=routing1,
-        options_factory=lambda resume: {"resume": resume},
+        options_factory=lambda resume, mode=None: {"resume": resume, "mode": mode},
         client_factory=factory1,
     )
     await session1.run_turn("hello")
-    assert calls1[0]["options"] == {"resume": None}
+    assert calls1[0]["options"]["resume"] is None
 
     routing2 = RoutingContext()
     factory2, calls2 = _client_factory()
@@ -156,11 +156,11 @@ async def test_second_turn_on_a_fresh_session_resumes_stored_id():
         store=store,
         chat=chat,
         routing=routing2,
-        options_factory=lambda resume: {"resume": resume},
+        options_factory=lambda resume, mode=None: {"resume": resume, "mode": mode},
         client_factory=factory2,
     )
     await session2.run_turn("continue")
-    assert calls2[0]["options"] == {"resume": "sdk-session-abc"}
+    assert calls2[0]["options"]["resume"] == "sdk-session-abc"
 
 
 async def test_failed_turn_resets_client_to_none_and_next_turn_rebuilds():
@@ -189,7 +189,7 @@ async def test_failed_turn_resets_client_to_none_and_next_turn_rebuilds():
         store=store,
         chat=chat,
         routing=routing,
-        options_factory=lambda resume: {"resume": resume},
+        options_factory=lambda resume, mode=None: {"resume": resume, "mode": mode},
         client_factory=factory,
     )
 
@@ -213,7 +213,7 @@ async def test_failed_turn_resets_client_to_none_and_next_turn_rebuilds():
     await session.run_turn("again")
 
     assert len(calls) == 2
-    assert calls[1]["options"] == {"resume": None}
+    assert calls[1]["options"]["resume"] is None
     assert session._client is not None
 
 
@@ -230,7 +230,7 @@ async def test_close_disconnects_the_client():
         store=store,
         chat=chat,
         routing=routing,
-        options_factory=lambda resume: {"resume": resume},
+        options_factory=lambda resume, mode=None: {"resume": resume, "mode": mode},
         client_factory=factory,
     )
     await session.run_turn("hello")
@@ -271,7 +271,7 @@ async def test_stale_resume_falls_back_to_a_fresh_session():
         store=store,
         chat=chat,
         routing=routing,
-        options_factory=lambda resume: {"resume": resume},
+        options_factory=lambda resume, mode=None: {"resume": resume, "mode": mode},
         client_factory=factory,
     )
 
@@ -314,7 +314,7 @@ async def test_connect_failure_unrelated_to_resume_propagates():
         store=store,
         chat=chat,
         routing=routing,
-        options_factory=lambda resume: {"resume": resume},
+        options_factory=lambda resume, mode=None: {"resume": resume, "mode": mode},
         client_factory=factory,
     )
 
@@ -329,3 +329,57 @@ async def test_connect_failure_unrelated_to_resume_propagates():
     row = await store.get_session("C1", "111.0")
     assert row.sdk_session_id == "perfectly-good-id"  # untouched
     assert chat.replies == []  # no bogus "I lost my memory" note
+
+
+async def test_the_threads_permission_mode_reaches_the_sdk():
+    """/mode writes permission_mode to the store; without this the SDK was only
+    ever given the deployment-wide default and the command was a no-op."""
+    FakeSdkClient.instances.clear()
+    store = MemoryStore()
+    chat = FakeChat()
+    factory, calls = _client_factory()
+    await store.upsert_session("C1", "111.0", permission_mode="plan")
+
+    session = JeanSession(
+        "C1",
+        "111.0",
+        store=store,
+        chat=chat,
+        routing=RoutingContext(),
+        options_factory=lambda resume, mode=None: {"resume": resume, "mode": mode},
+        client_factory=factory,
+    )
+    await session.run_turn("hello")
+
+    assert calls[0]["options"]["mode"] == "plan"
+
+
+async def test_changing_mode_mid_thread_rebuilds_the_client():
+    """permission_mode is fixed when the SDK client connects, so a cached client
+    would keep the old mode forever -- `/mode bypassPermissions` (the escape
+    hatch from approval prompts) would appear to do nothing until the idle sweep
+    dropped the session, up to idle_minutes later."""
+    FakeSdkClient.instances.clear()
+    store = MemoryStore()
+    chat = FakeChat()
+    factory, calls = _client_factory()
+
+    session = JeanSession(
+        "C1",
+        "111.0",
+        store=store,
+        chat=chat,
+        routing=RoutingContext(),
+        options_factory=lambda resume, mode=None: {"resume": resume, "mode": mode},
+        client_factory=factory,
+    )
+    await session.run_turn("hello")
+    assert calls[0]["options"]["mode"] is None
+
+    await store.upsert_session("C1", "111.0", permission_mode="bypassPermissions", touch=False)
+    await session.run_turn("now hurry up")
+
+    assert len(calls) == 2  # rebuilt rather than reusing the cached client
+    assert calls[1]["options"]["mode"] == "bypassPermissions"
+    assert calls[1]["options"]["resume"] == "sdk-session-abc"  # same conversation
+    assert FakeSdkClient.instances[0].exited is True  # old client closed, not leaked

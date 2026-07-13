@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
@@ -10,6 +11,8 @@ from jean.persona.model import EXTRACTION_PROMPT, ApproverEntry, Identity, Manag
 
 if TYPE_CHECKING:
     from jean.config import Settings
+
+logger = logging.getLogger("jean.persona")
 
 # extractor(system, prompt) -> raw model text (expected to be a JSON object)
 Extractor = Callable[[str, str], Awaitable[str]]
@@ -22,6 +25,41 @@ _SYSTEM_PROMPT = (
 _MENTION_RE = re.compile(r"<@([UW][A-Z0-9]+)(?:\|[^>]+)?>")
 _CHANNEL_RE = re.compile(r"<#([CGD][A-Z0-9]+)(?:\|[^>]*)?>")
 _NAME_RE = re.compile(r"^\s*[-*]?\s*Name:\s*(\S.*?)\s*$", re.IGNORECASE | re.MULTILINE)
+
+_APPROVER_HEADING_RE = re.compile(r"^#*\s*approvers?\s*:?\s*$", re.IGNORECASE)
+_APPROVE_WORD_RE = re.compile(r"approv", re.IGNORECASE)
+_SCOPE_RE = re.compile(r"scope:\s*([\w, -]+)", re.IGNORECASE)
+_CATCHALL_RE = re.compile(
+    r"catch[\s-]?all|any(?:thing)?\s+else|everything\s+else|all\s+other", re.IGNORECASE
+)
+
+
+def _approver_segments(persona: str) -> list[str]:
+    """The pieces of `persona` that describe an approver: every bullet under an
+    `Approvers:` heading, plus every *sentence* that talks about approving and
+    names someone.
+
+    Sentences, not lines, because a persona written as prose puts the manager and
+    the approver in one paragraph ("My manager is <@U1>. Approver: <@U2>.") -- a
+    line-wide match would sweep the manager in as an approver of everything.
+    """
+    segments: list[str] = []
+    in_section = False
+    for line in persona.splitlines():
+        stripped = line.strip()
+        if _APPROVER_HEADING_RE.match(stripped):
+            in_section = True
+            continue
+        if in_section:
+            if stripped and _MENTION_RE.search(stripped):
+                segments.append(stripped)
+                continue
+            # A blank line or a line naming nobody ends the list.
+            in_section = False
+        for sentence in stripped.split("."):
+            if _APPROVE_WORD_RE.search(sentence) and _MENTION_RE.search(sentence):
+                segments.append(sentence)
+    return segments
 
 
 def assert_ids_grounded(soul: SoulData, persona: str) -> None:
@@ -54,13 +92,19 @@ def regex_fallback(persona: str) -> SoulData:
     if manager is None and mentions:
         manager = Manager(user_id=mentions[0])
 
-    for match in re.finditer(
-        r"approv\w*[^.]*?<@([UW][A-Z0-9]+)>(?:[^.]*?scope:\s*([\w, -]+))?", persona, re.IGNORECASE
-    ):
-        uid, scope = match.group(1), (match.group(2) or "").strip()
-        if manager is not None and uid == manager.user_id:
-            continue
-        approvers.append(ApproverEntry(user_id=uid, scope=scope))
+    # The manager is deliberately NOT excluded here: in the documented format
+    # (see README) the manager *is* the catch-all approver, and skipping them
+    # left an approval nobody was authorized to click.
+    seen: set[str] = set()
+    for segment in _approver_segments(persona):
+        scope_match = _SCOPE_RE.search(segment)
+        scope = scope_match.group(1).strip() if scope_match else ""
+        catchall = bool(_CATCHALL_RE.search(segment))
+        for uid in _MENTION_RE.findall(segment):
+            if uid in seen:
+                continue
+            seen.add(uid)
+            approvers.append(ApproverEntry(user_id=uid, scope=scope, catchall=catchall))
 
     name_match = _NAME_RE.search(persona)
     identity = Identity(name=name_match.group(1)) if name_match else Identity()
@@ -151,7 +195,18 @@ async def load_soul_data(settings: Settings, *, extractor: Extractor | None = No
         soul = _soul_from_json(raw)
         assert_ids_grounded(soul, persona)
     except Exception:
-        return regex_fallback(persona)
+        # Loudly: the fallback is a *degraded* parse, and a soul that silently
+        # loses its approvers turns every approval into one nobody can click.
+        logger.warning(
+            "soul extraction failed; falling back to regex parse of %s", settings.identity_path
+        )
+        soul = regex_fallback(persona)
+        logger.warning(
+            "regex fallback found manager=%s approvers=%s",
+            soul.manager.user_id if soul.manager else None,
+            [(a.user_id, a.scope, a.catchall) for a in soul.approvers],
+        )
+        return soul
 
     settings.cache_dir.mkdir(parents=True, exist_ok=True)
     cache_path.write_text(raw)

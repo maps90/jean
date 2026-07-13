@@ -118,6 +118,22 @@ default_headers={"anthropic-beta": "oauth-2025-04-20"})` or the API returns 401.
 - **Small, frequent commits** — one per plan task, using the plan's commit message.
 - Do NOT add AI co-author trailers to commits in this repo.
 
+### One feature at a time, in its own worktree
+
+- **Every new feature or bugfix starts in a git worktree**, never directly in the primary
+  checkout. Create it before the first edit:
+  `git worktree add ../jean-<slug> -b <slug>` (branch off `main`), then work there.
+  When the branch is merged or abandoned, remove it: `git worktree remove ../jean-<slug>`.
+  The primary checkout stays on a clean `main` so a review, a hotfix, or a `kubectl`-adjacent
+  debug session never collides with in-progress work.
+- **No parallel work.** Do one task at a time, start to finish, before picking up the next.
+  Do not fan out subagents to edit code concurrently, do not run multiple features in flight,
+  and do not split a plan across parallel agents — sequential execution only. Read-only
+  exploration may be delegated, but writes come from one worker, one branch, one worktree.
+- **Why:** jean's correctness lives in ordering (per-thread locks, LISTEN/NOTIFY handoffs,
+  the plugin MCP takeover). Interleaved edits from concurrent agents produce diffs no one can
+  reason about and a verify gate no one can trust.
+
 ## SDK & Slack gotchas (verified against claude-agent-sdk 0.2.110 / slack-bolt 1.29.0)
 
 - In-process MCP tools surface as `mcp__jean_slack__<tool>` (server key `jean_slack`). List

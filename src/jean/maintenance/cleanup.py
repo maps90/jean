@@ -9,7 +9,7 @@ from jean.ports import MaintenanceStore, PruneResult
 
 logger = logging.getLogger("jean.maintenance")
 
-_WEEK_SECONDS = 7 * 86400
+_DAY_SECONDS = 86400
 
 
 class CleanupScheduler:
@@ -17,8 +17,9 @@ class CleanupScheduler:
 
     Runs on every worker but claims the work through the store's
     `try_claim_cleanup` gate, so across N stateless workers exactly one prune
-    happens per `interval_seconds`. Each run deletes rows older than
-    `retention_seconds`. The loop is resilient: a failed cycle is logged and
+    happens per `interval_seconds`. Sessions and approvals expire on separate
+    windows -- a thread's memory going stale and an audit record aging out are
+    different concerns. The loop is resilient: a failed cycle is logged and
     retried on the next check rather than killing the task.
     """
 
@@ -26,13 +27,15 @@ class CleanupScheduler:
         self,
         store: MaintenanceStore,
         *,
-        retention_seconds: float,
-        interval_seconds: float = _WEEK_SECONDS,
+        session_retention_seconds: float,
+        approval_retention_seconds: float,
+        interval_seconds: float = _DAY_SECONDS,
         check_seconds: float = 3600,
         clock: Callable[[], float] = time.time,
     ) -> None:
         self._store = store
-        self._retention_seconds = retention_seconds
+        self._session_retention_seconds = session_retention_seconds
+        self._approval_retention_seconds = approval_retention_seconds
         self._interval_seconds = interval_seconds
         self._check_seconds = check_seconds
         self._clock = clock
@@ -41,13 +44,18 @@ class CleanupScheduler:
         """Claim the cycle and prune if we won; return None if a peer owns it."""
         if not await self._store.try_claim_cleanup(self._interval_seconds):
             return None
-        cutoff = self._clock() - self._retention_seconds
-        result = await self._store.prune(sessions_older_than=cutoff, approvals_older_than=cutoff)
+        now = self._clock()
+        result = await self._store.prune(
+            sessions_older_than=now - self._session_retention_seconds,
+            approvals_older_than=now - self._approval_retention_seconds,
+        )
         logger.info(
-            "retention cleanup pruned %d approvals, %d sessions (older than %.0fs)",
+            "retention cleanup pruned %d approvals (>%.0fs) and %d sessions with their "
+            "transcripts (>%.0fs)",
             result.approvals_deleted,
+            self._approval_retention_seconds,
             result.sessions_deleted,
-            self._retention_seconds,
+            self._session_retention_seconds,
         )
         return result
 

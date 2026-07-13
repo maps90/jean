@@ -34,15 +34,30 @@ def test_defaults_resolve(clean_env):
     assert settings.anthropic_api_key is None
     assert settings.claude_code_oauth_token is None
     assert settings.cleanup_enabled is True
-    assert settings.cleanup_retention_days == 30
 
 
 def test_cleanup_settings_override(clean_env):
     clean_env.setenv("JEAN_CLEANUP_ENABLED", "false")
-    clean_env.setenv("JEAN_CLEANUP_RETENTION_DAYS", "90")
+    clean_env.setenv("JEAN_SESSION_RETENTION_DAYS", "7")
+    clean_env.setenv("JEAN_APPROVAL_RETENTION_DAYS", "90")
+    clean_env.setenv("JEAN_CLEANUP_INTERVAL_HOURS", "12")
+    clean_env.setenv("JEAN_TRANSCRIPT_MAX_MB", "64")
     settings = Settings.load()
     assert settings.cleanup_enabled is False
-    assert settings.cleanup_retention_days == 90
+    assert settings.session_retention_days == 7
+    assert settings.approval_retention_days == 90
+    assert settings.cleanup_interval_hours == 12
+    assert settings.transcript_max_mb == 64
+
+
+def test_retention_defaults(monkeypatch):
+    monkeypatch.setenv("JEAN_SLACK_BOT_TOKEN", "xoxb-1")
+    monkeypatch.setenv("JEAN_SLACK_APP_TOKEN", "xapp-1")
+    settings = Settings()
+    assert settings.session_retention_days == 3
+    assert settings.approval_retention_days == 30
+    assert settings.cleanup_interval_hours == 24
+    assert settings.transcript_max_mb == 32
 
 
 def test_home_expands_under_home_dir(clean_env):

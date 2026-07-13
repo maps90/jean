@@ -34,6 +34,7 @@ Slack (Socket Mode)  ── load-balances events across all connected workers �
    │   ├─ SessionManager (per-worker cache) → JeanSession → ClaudeSDKClient(resume=…)
    │   ├─ ThreadLock port          (serialize turns per thread)
    │   ├─ jean_slack MCP tools      (reply / edit / upload / react / request_approval)
+   │   ├─ MCP proxy → one stdio MCP server per *worker*, shared by every thread
    │   ├─ Persona (IDENTITY.md → typed SoulData, sha-cached; trust boundary)
    │   └─ ApprovalGate → ApprovalCoordinator port (LISTEN/NOTIFY)
    ▼
@@ -76,8 +77,12 @@ Slack (Socket Mode)  ── load-balances events across all connected workers �
 | `gateway/engagement.py` | Pure engagement decision (mention / disengage / DM / reply) |
 | `gateway/dispatch.py` | Inbound message → attachment envelope → session turn |
 | `gateway/app.py` | Gateway domain methods + the Slack event/action/command wiring |
+| `plugins/mcp_stdio.py` | Spawn / reap a stdio MCP server child |
+| `plugins/mcp_client.py` | One long-lived MCP server per worker: handshake, multiplexed calls, restart |
+| `plugins/mcp_proxy.py` | Re-expose those servers' tools in-process, under their original tool ids |
+| `plugins/mcp_config.py` | Which servers jean runs; takes a plugin's `.mcp.json` over from the CLI |
 | `health.py` | `/healthz` (liveness) + `/readyz` (Postgres ping) |
-| `server.py` | Composition root: pool, adapters, MCP server, socket-mode, sweeper |
+| `server.py` | Composition root: pool, adapters, MCP servers, socket-mode, sweeper |
 
 ## Request flow (happy path)
 

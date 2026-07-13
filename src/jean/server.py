@@ -21,8 +21,9 @@ from jean.persona.identity import load_identity
 from jean.persona.model import SoulData
 from jean.plugins.git_resolver import GitMarketplaceResolver
 from jean.plugins.manifest import load_mcp_config, load_plugin_manifest
-from jean.plugins.mcp_config import probeable_servers
-from jean.plugins.mcp_probe import preflight
+from jean.plugins.mcp_client import start_clients
+from jean.plugins.mcp_config import remote_servers, stdio_servers, take_over_plugin_mcp
+from jean.plugins.mcp_proxy import build_proxy_servers
 from jean.session.manager import SessionManager
 from jean.session.session import JeanSession, RoutingContext
 from jean.slack.client import SlackSurface
@@ -85,13 +86,46 @@ async def run() -> None:
     )
     plugins = await resolver.resolve(load_plugin_manifest(settings.plugins_path))
 
+    health_app = make_health_app(ready_check=store.ping)
+    # Probe traffic is constant and uninteresting; log only 4xx/5xx (see
+    # ErrorOnlyAccessLogger) so it does not bury everything else.
+    runner = web.AppRunner(health_app, access_log_class=ErrorOnlyAccessLogger)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", settings.health_port)
+    await site.start()
+    logger.info("jean health server listening on :%d", settings.health_port)
+
+    # Run every stdio MCP server ONCE, here, for the whole worker -- and re-expose
+    # their tools in-process (mcp_proxy) so the CLI never spawns any of its own.
+    #
+    # stdio transport *is* a child process, so a per-session ClaudeSDKClient cannot
+    # share one: the CLI used to fork a full set (kubernetes + grafana +
+    # elasticsearch, ~250 MB) for every Slack thread. Two live threads plus their
+    # CLI children pinned the pod against its 1 GiB limit, and the next thread's
+    # CLI then stalled in memory reclaim and never answered the SDK's `initialize`
+    # -- surfacing as "Control request timeout: initialize". A hang, not a crash:
+    # nothing was OOM-killed, the cgroup was simply full.
+    #
+    # This doubles as the preflight: the CLI never reports whether a server it
+    # spawned came up (its init message calls them all "pending" and carries none
+    # of their tools), so connecting here is what makes a broken server visible in
+    # the log -- and now the connection that proved it works is the one every
+    # thread uses.
+    #
+    # Placement is deliberate: *after* the health server binds, so a slow cold
+    # `npx` cannot stall the liveness probe into killing the pod, and *before*
+    # Slack connects, so no thread starts against a server that is still coming up.
+    mcp_clients = await start_clients(stdio_servers(extra_mcp, plugins))
+    take_over_plugin_mcp(plugins)
+    mcp_servers = {**build_proxy_servers(mcp_clients), **remote_servers(extra_mcp)}
+
     def options_factory(resume: str | None) -> ClaudeAgentOptions:
         return build_agent_options(
             persona_text=persona_text,
             agent_name=soul_provider().identity.name,
             slack_server=server_mcp,
             slack_tool_names=tool_names,
-            extra_mcp=extra_mcp,
+            mcp_servers=mcp_servers,
             plugins=plugins,
             settings=settings,
             resume=resume,
@@ -119,27 +153,6 @@ async def run() -> None:
     )
     register(app, gw)
 
-    health_app = make_health_app(ready_check=store.ping)
-    # Probe traffic is constant and uninteresting; log only 4xx/5xx (see
-    # ErrorOnlyAccessLogger) so it does not bury everything else.
-    runner = web.AppRunner(health_app, access_log_class=ErrorOnlyAccessLogger)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", settings.health_port)
-    await site.start()
-    logger.info("jean health server listening on :%d", settings.health_port)
-
-    # Load every MCP server once, here: the CLI spawns them per session and never
-    # reports back whether they came up (its init message calls every plugin
-    # server "pending" and carries none of their tools), so one that fails to
-    # start leaves a thread silently tool-less for its whole life -- the CLI does
-    # not retry inside a session. Probing does the same `npx` resolution the CLI
-    # will do, retries it, and says in the log what loaded and what did not.
-    #
-    # Placement is deliberate: *after* the health server binds, so a slow cold
-    # `npx` cannot stall the liveness probe into killing the pod, and *before*
-    # Slack connects, so no thread starts against a server that is still coming up.
-    await preflight(probeable_servers(extra_mcp, plugins))
-
     tasks = [
         AsyncSocketModeHandler(app, settings.slack_app_token).start_async(),
         manager.run_sweeper(),
@@ -153,6 +166,11 @@ async def run() -> None:
     try:
         await asyncio.gather(*tasks)
     finally:
+        # The MCP servers are jean's children now, so jean is what reaps them --
+        # nothing else will, and a stray npx child would outlive the pod's grace
+        # period and be SIGKILLed.
+        for client in mcp_clients:
+            await client.close()
         await runner.cleanup()
         await store.close()
 

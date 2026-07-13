@@ -1,21 +1,41 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
 from jean.ports import ResolvedPlugin
 
+logger = logging.getLogger(__name__)
+
+# Where a plugin's MCP config is parked once jean takes its servers over. The CLI
+# spawns whatever it finds in a plugin's `.mcp.json` -- once per session, per
+# server -- so leaving the file in place would run every server twice: jean's
+# shared copy, and the CLI's private one. Renaming is reversible and leaves the
+# original readable, which deleting would not.
+DISABLED_SUFFIX = ".jean-owned"
+
+
+def _mcp_json(plugin: ResolvedPlugin) -> Path | None:
+    """The plugin's MCP config, whether or not jean has taken it over already
+    (the marketplace clone is cached, so a second boot finds the renamed file)."""
+    for name in (".mcp.json", f".mcp.json{DISABLED_SUFFIX}"):
+        path = Path(plugin.path) / name
+        if path.exists():
+            return path
+    return None
+
 
 def plugin_mcp_servers(plugin: ResolvedPlugin) -> dict[str, dict[str, Any]]:
-    """The stdio MCP servers a plugin declares in its own `.mcp.json`.
+    """The stdio MCP servers a plugin declares.
 
     Only stdio servers (those with a `command`) are returned: they are the ones
-    jean can probe by spawning them, and the ones that fail when the command
-    cannot be resolved at runtime.
+    jean runs itself. An http/sse server has no process to share, so the CLI can
+    hold its own connection to it and jean leaves it alone.
     """
-    path = Path(plugin.path) / ".mcp.json"
-    if not path.exists():
+    path = _mcp_json(plugin)
+    if path is None:
         return {}
     servers = json.loads(path.read_text()).get("mcpServers", {})
     if not isinstance(servers, dict):
@@ -23,45 +43,43 @@ def plugin_mcp_servers(plugin: ResolvedPlugin) -> dict[str, dict[str, Any]]:
     return {name: cfg for name, cfg in servers.items() if "command" in cfg}
 
 
-def plugin_tool_patterns(plugins: list[ResolvedPlugin]) -> list[str]:
-    """Allow-list patterns for the tools a plugin's MCP servers expose.
+def stdio_servers(extra_mcp: dict[str, Any], plugins: list[ResolvedPlugin]) -> dict[str, Any]:
+    """Every stdio MCP server jean runs itself, keyed by its agent-facing name.
 
-    The CLI names a plugin's server `plugin:<plugin>:<server>` and exposes its
-    tools as `mcp__plugin_<plugin>_<server>__<tool>` -- colons become
-    underscores (verified against the running CLI: `plugin:kubectl:kubernetes`
-    serves `mcp__plugin_kubectl_kubernetes__pods_list`).
-
-    A bare `mcp__*` does NOT work here: the CLI rejects it outright
-    ("Wildcard tool name mcp__* is not supported in allow rules") and drops the
-    rule, so every plugin tool stays unreachable. A glob is only allowed in the
-    tool position, after a literal server prefix.
-    """
-    return [
-        f"mcp__plugin_{plugin.name}_{server}__*"
-        for plugin in plugins
-        for server in plugin_mcp_servers(plugin)
-    ]
-
-
-def probeable_servers(
-    extra_mcp: dict[str, Any], plugins: list[ResolvedPlugin]
-) -> dict[str, dict[str, Any]]:
-    """Every stdio MCP server jean can spawn itself, keyed by a name for the logs.
-
-    Servers jean cannot run (an http one in `mcp.json`, say) are not jean's to
-    check and are left out rather than failing the boot probe.
+    The key becomes the tool prefix the agent sees (`mcp__<key>__<tool>`), so it
+    reproduces exactly what the CLI called the server when the CLI still spawned
+    it: `plugin_kubectl_kubernetes` for a plugin's server (the CLI names it
+    `plugin:kubectl:kubernetes` and converts the colons), and the plain name for
+    one declared in jean's own mcp.json. Keeping those ids stable means every
+    skill and prompt that already refers to a tool keeps working.
     """
     servers = {name: cfg for name, cfg in extra_mcp.items() if "command" in cfg}
     for plugin in plugins:
         for server, cfg in plugin_mcp_servers(plugin).items():
-            servers[f"{plugin.name}:{server}"] = cfg
+            servers[f"plugin_{plugin.name}_{server}"] = cfg
     return servers
 
 
-def extra_mcp_tool_patterns(servers: dict[str, Any]) -> list[str]:
-    """Allow-list patterns for servers configured directly in jean's `mcp.json`.
+def remote_servers(extra_mcp: dict[str, Any]) -> dict[str, Any]:
+    """The http/sse servers in mcp.json, handed to the CLI untouched.
 
-    These are not plugin-scoped, so they carry the plain `mcp__<server>__`
-    prefix.
+    There is no child process to share: every session's CLI just opens its own
+    connection to the same remote server, which is what jean wants anyway.
     """
-    return [f"mcp__{name}__*" for name in servers]
+    return {name: cfg for name, cfg in extra_mcp.items() if "command" not in cfg}
+
+
+def take_over_plugin_mcp(plugins: list[ResolvedPlugin]) -> None:
+    """Stop the CLI from spawning a plugin's MCP servers behind jean's back.
+
+    jean already runs each of them once and proxies the tools in-process. If the
+    plugin's `.mcp.json` stayed where it is, the CLI would *also* fork its own
+    copy of every server for every session -- which is the duplication this whole
+    arrangement exists to remove -- and the agent would see each tool twice.
+    """
+    for plugin in plugins:
+        path = Path(plugin.path) / ".mcp.json"
+        if not path.exists():
+            continue
+        path.rename(path.with_suffix(f".json{DISABLED_SUFFIX}"))
+        logger.info("mcp: took over %s's servers; the CLI will not spawn its own", plugin.name)

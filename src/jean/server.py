@@ -68,6 +68,9 @@ async def run() -> None:
         )
         return resp["ts"]
 
+    async def update_blocks(channel: str, ts: str, text: str, blocks: list[dict]) -> None:
+        await app.client.chat_update(channel=channel, ts=ts, text=text, blocks=blocks)
+
     def manager_of() -> str | None:
         manager = soul_provider().manager
         return manager.user_id if manager else None
@@ -75,6 +78,7 @@ async def run() -> None:
     gate = ApprovalGate(
         post_blocks,
         store,
+        update_blocks=update_blocks,
         approvers_provider=lambda: soul_provider().approvers,
         manager_provider=manager_of,
         timeout_seconds=settings.approval_ttl,

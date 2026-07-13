@@ -28,6 +28,8 @@ def _make_gate(
     posted_event=None,
     manager=None,
     env_approvers=(),
+    updated=None,
+    update_blocks=None,
 ):
     async def post_blocks(channel, thread_ts, text, blocks):
         posted.append(blocks)
@@ -35,9 +37,14 @@ def _make_gate(
             posted_event.set()
         return "999.0"
 
+    async def _record_update(channel, ts, text, blocks):
+        if updated is not None:
+            updated.append((channel, ts, text, blocks))
+
     return ApprovalGate(
         post_blocks,
         coordinator,
+        update_blocks=update_blocks or _record_update,
         approvers_provider=lambda: list(approvers),
         manager_provider=lambda: manager,
         timeout_seconds=timeout_seconds,
@@ -202,9 +209,13 @@ async def test_row_and_approvers_exist_before_blocks_are_posted():
         assert result == "approved"
         return "999.0"
 
+    async def update_blocks(channel, ts, text, blocks):
+        return None
+
     gate = ApprovalGate(
         post_blocks,
         coordinator,
+        update_blocks=update_blocks,
         approvers_provider=lambda: list(approvers),
         timeout_seconds=5,
     )
@@ -226,6 +237,122 @@ async def test_handle_action_unknown_approval_id_returns_gone():
     posted: list[list[dict]] = []
     gate = _make_gate(coordinator, posted)
     assert await gate.handle_action("jean_appr:approve:doesnotexist", "U11111") == "gone"
+
+
+async def test_approved_message_is_rewritten_without_buttons():
+    """The clicker's only feedback is the message itself: once decided, the
+    buttons must be gone (nothing left to click) and the decision visible."""
+    coordinator = MemoryStore()
+    posted: list[list[dict]] = []
+    updated: list[tuple] = []
+    posted_event = asyncio.Event()
+    approvers = [ApproverEntry(user_id="U11111", scope="", catchall=True)]
+    gate = _make_gate(
+        coordinator,
+        posted,
+        approvers=approvers,
+        timeout_seconds=5,
+        posted_event=posted_event,
+        updated=updated,
+    )
+
+    async def click_approve():
+        await posted_event.wait()
+        await gate.handle_action(_action_id_for(posted[0], "approve"), "U11111")
+
+    await asyncio.gather(gate.request("C1", "111.0", "deploy please"), click_approve())
+
+    assert len(updated) == 1
+    channel, ts, text, blocks = updated[0]
+    assert (channel, ts) == ("C1", "999.0")
+    assert _action_ids(blocks) == []
+    assert not any(b["type"] == "actions" for b in blocks)
+    rendered = str(blocks)
+    assert "Approved" in rendered
+    assert "<@U11111>" in rendered
+    assert "Approved" in text
+
+
+async def test_denied_message_is_rewritten_without_buttons():
+    coordinator = MemoryStore()
+    posted: list[list[dict]] = []
+    updated: list[tuple] = []
+    posted_event = asyncio.Event()
+    approvers = [ApproverEntry(user_id="U11111", scope="", catchall=True)]
+    gate = _make_gate(
+        coordinator,
+        posted,
+        approvers=approvers,
+        timeout_seconds=5,
+        posted_event=posted_event,
+        updated=updated,
+    )
+
+    async def click_deny():
+        await posted_event.wait()
+        await gate.handle_action(_action_id_for(posted[0], "deny"), "U11111")
+
+    await asyncio.gather(gate.request("C1", "111.0", "deploy please"), click_deny())
+
+    assert len(updated) == 1
+    blocks = updated[0][3]
+    assert _action_ids(blocks) == []
+    rendered = str(blocks)
+    assert "Denied" in rendered
+    assert "<@U11111>" in rendered
+
+
+async def test_timed_out_message_is_rewritten_without_buttons():
+    """A request nobody answers is system-denied -- its buttons must not stay
+    live and clickable forever."""
+    coordinator = MemoryStore()
+    posted: list[list[dict]] = []
+    updated: list[tuple] = []
+    approvers = [ApproverEntry(user_id="U11111", scope="", catchall=True)]
+    gate = _make_gate(
+        coordinator, posted, approvers=approvers, timeout_seconds=0.05, updated=updated
+    )
+
+    decision = await gate.request("C1", "111.0", "deploy please")
+
+    assert decision.approved is False
+    assert len(updated) == 1
+    blocks = updated[0][3]
+    assert _action_ids(blocks) == []
+    assert "expired" in str(blocks).lower()
+    # "system" is a sentinel, not a Slack id -- never @-mention it.
+    assert "<@system>" not in str(blocks)
+
+
+async def test_failing_message_update_does_not_lose_the_decision():
+    """The decision is authoritative (it lives in the store); a Slack hiccup
+    while rewriting the message must not turn an approval into an error."""
+    coordinator = MemoryStore()
+    posted: list[list[dict]] = []
+    posted_event = asyncio.Event()
+    approvers = [ApproverEntry(user_id="U11111", scope="", catchall=True)]
+
+    async def boom(channel, ts, text, blocks):
+        raise RuntimeError("slack is having a day")
+
+    gate = _make_gate(
+        coordinator,
+        posted,
+        approvers=approvers,
+        timeout_seconds=5,
+        posted_event=posted_event,
+        update_blocks=boom,
+    )
+
+    async def click_approve():
+        await posted_event.wait()
+        await gate.handle_action(_action_id_for(posted[0], "approve"), "U11111")
+
+    decision, _ = await asyncio.gather(
+        gate.request("C1", "111.0", "deploy please"), click_approve()
+    )
+    assert decision.approved is True
+    assert decision.by == "U11111"
 
 
 async def test_double_click_second_click_returns_gone():

@@ -24,6 +24,11 @@ CREATE TABLE IF NOT EXISTS approvals (
   resolved_at double precision);
 CREATE TABLE IF NOT EXISTS maintenance (
   job text PRIMARY KEY, last_run double precision NOT NULL DEFAULT 0);
+-- A transcript cannot exist without its session: the FK below means
+-- save() raises ForeignKeyViolationError unless a (channel, thread_ts) row
+-- already exists in `sessions` -- callers must upsert_session() first.
+-- ON DELETE CASCADE means deleting (or pruning) the session takes its
+-- transcript with it; see MemoryStore.prune's matching cascade.
 CREATE TABLE IF NOT EXISTS transcripts (
   channel text NOT NULL, thread_ts text NOT NULL,
   sdk_session_id text NOT NULL,

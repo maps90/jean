@@ -102,6 +102,15 @@ class MemoryStore:
 
     # ---- TranscriptStore ----
     async def save(self, channel: str, thread_ts: str, sdk_session_id: str, data: bytes) -> None:
+        # Mirrors Postgres's FK (transcripts.channel,thread_ts -> sessions):
+        # a transcript cannot exist without its session row. Postgres enforces
+        # this with a ForeignKeyViolationError; here we raise the same
+        # *behavior* (see tests/store_behavior.py -- the two adapters differ
+        # in exception type, not in whether they raise).
+        if (channel, thread_ts) not in self._sessions:
+            raise LookupError(
+                f"no session for ({channel!r}, {thread_ts!r}) -- call upsert_session() before save()"
+            )
         self._transcripts[(channel, thread_ts)] = (sdk_session_id, data)
 
     async def load(self, channel: str, thread_ts: str, sdk_session_id: str) -> bytes | None:

@@ -7,10 +7,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
+from claude_agent_sdk import AssistantMessage as RealAssistantMessage
 from claude_agent_sdk import ProcessError
 
 from jean.db.memory import MemoryStore
-from jean.session.session import JeanSession, RoutingContext
+from jean.session.session import ASSISTANT_MESSAGE_CLASS_NAME, JeanSession, RoutingContext
 from jean.session.transcript import LocalTranscripts
 
 # JeanSession takes its cap from Settings.transcript_max_mb (server.py wires it in),
@@ -38,6 +39,27 @@ class AssistantMessage:
     run_turn counts them STRUCTURALLY (by class name) to know how many records this
     turn still owes the transcript: session/ is domain code and may not import the SDK
     (CLAUDE.md's layering rule)."""
+
+
+def test_assistant_message_class_name_matches_the_real_sdk_class():
+    """session/session.py cannot `import claude_agent_sdk` (CLAUDE.md's layering
+    rule forbids domain code touching the SDK), so run_turn cannot `isinstance()`
+    against the real `AssistantMessage` class. Instead it matches on the class's
+    NAME, via the `ASSISTANT_MESSAGE_CLASS_NAME` constant.
+
+    That is a soft dependency on a string staying in sync with the SDK. If
+    claude_agent_sdk ever renames AssistantMessage, the structural match in run_turn
+    silently stops counting: `streamed` collapses to 0 every turn, the settle target
+    collapses to `baseline + 0`, and every turn's transcript is archived before the
+    CLI finishes writing it -- the original data-loss bug this module exists to
+    prevent, resurrected, with a fully green test suite (see _settle's
+    `count_reliable` fallback for the runtime backstop for that same failure).
+
+    This test is what turns that silent drift into a loud, immediate CI failure: it
+    imports the real SDK class and asserts its `__name__` is exactly the string the
+    domain matches on. If either side renames, this test breaks.
+    """
+    assert RealAssistantMessage.__name__ == ASSISTANT_MESSAGE_CLASS_NAME
 
 
 class FakeSdkClient:
@@ -969,6 +991,85 @@ async def test_archive_happens_anyway_and_warns_when_the_transcript_never_settle
         for r in caplog.records
         if r.levelno >= logging.WARNING
     ), f"expected a loud warning, got {[r.message for r in caplog.records]}"
+
+
+def _renamed_assistant_message_client_factory(local: LocalTranscripts, delay: float):
+    """Simulates claude_agent_sdk renaming AssistantMessage out from under run_turn's
+    structural match: this client writes a transcript exactly like a real tool turn
+    (see `_tool_turn_client_factory`) -- a tool_use record flushed early, the final
+    answer flushed `delay` seconds later -- but streams instances of a class that is
+    NOT named "AssistantMessage". `type(msg).__name__ == ASSISTANT_MESSAGE_CLASS_NAME`
+    then matches nothing, so `assistant_msgs` stays 0 for a turn that otherwise
+    succeeds -- exactly the condition `_settle`'s `count_reliable` fallback exists
+    to catch."""
+
+    class RenamedAssistantMessage:
+        """Stands in for what the SDK class would look like after a rename: same
+        role, different `__name__`, so the structural match in run_turn cannot see
+        it."""
+
+    def _append(chunk: bytes) -> None:
+        local.write("sdk-session-abc", (local.read("sdk-session-abc") or b"") + chunk)
+
+    class RenamedClient(FakeSdkClient):
+        async def query(self, text: str) -> None:
+            await super().query(text)
+            _append(b'{"type":"user"}\n')
+            _append(b'{"type":"assistant","tool_use":"mcp__jean_slack__reply"}\n')
+            _append(b'{"type":"user","tool_result":"ok"}\n')
+
+            async def _flush_later() -> None:
+                await asyncio.sleep(delay)
+                _append(b'{"type":"assistant","text":"BANANA"}\n')
+
+            asyncio.create_task(_flush_later())
+
+        async def receive_response(self):
+            # Named unlike "AssistantMessage" -- the rename this test simulates.
+            yield RenamedAssistantMessage()
+            yield RenamedAssistantMessage()
+            yield FakeResultMessage(session_id="sdk-session-abc")
+
+    return lambda *, options: RenamedClient(options=options)
+
+
+async def test_settle_falls_back_to_quiet_wait_and_warns_when_the_sdk_class_is_unrecognized(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+):
+    """If claude_agent_sdk ever renames AssistantMessage, run_turn's structural match
+    finds nothing and `assistant_msgs` stays 0 -- collapsing the naive target to
+    `baseline + 0`, which the baseline alone already satisfies. Without the
+    `count_reliable` fallback, `_settle` would return the instant it takes its first
+    reading, archiving a transcript that ends on an unresolved tool_use -- before the
+    CLI has even written this turn's answer. This pins that the fallback instead
+    waits for the file to go quiet (i.e. does NOT return instantly) and warns loudly,
+    so a rename becomes a slow-but-correct archive plus a loud log line, never a
+    silent truncation."""
+    FakeSdkClient.instances.clear()
+    store, chat = MemoryStore(), FakeChat()
+    local = LocalTranscripts(cli_home=tmp_path, cwd=Path("/w"))
+    factory = _renamed_assistant_message_client_factory(local, delay=0.05)
+
+    session = _session(
+        store, chat, factory, local, settle_timeout=5.0, settle_interval=0.01, settle_quiet=0.05
+    )
+
+    started = time.monotonic()
+    with caplog.at_level(logging.WARNING, logger="jean.session.session"):
+        await session.run_turn("say BANANA")
+    elapsed = time.monotonic() - started
+
+    assert elapsed >= 0.05, "settle returned before the CLI's delayed write -- it did not wait"
+    stored = await store.load("C1", "111.0", "sdk-session-abc")
+    assert stored is not None
+    assert b"BANANA" in stored, "archived before the delayed answer was written"
+    assert any(
+        "could not count" in r.message and "AssistantMessage" in r.message
+        for r in caplog.records
+        if r.levelno >= logging.WARNING
+    ), (
+        f"expected a loud warning about the unrecognized SDK class, got {[r.message for r in caplog.records]}"
+    )
 
 
 async def test_settle_wait_does_not_fire_when_there_is_no_local_transcript(tmp_path: Path):

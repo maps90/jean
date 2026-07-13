@@ -67,12 +67,26 @@ async def run() -> None:
         )
         return resp["ts"]
 
+    def manager_of() -> str | None:
+        manager = soul_provider().manager
+        return manager.user_id if manager else None
+
     gate = ApprovalGate(
         post_blocks,
         store,
         approvers_provider=lambda: soul_provider().approvers,
+        manager_provider=manager_of,
         timeout_seconds=settings.approval_ttl,
+        env_approvers=settings.approvers,
     )
+    if not soul_provider().approvers and not settings.approvers and manager_of() is None:
+        # Every approval will fail closed until this is fixed -- say so at boot
+        # rather than at the first tool call a human is waiting on.
+        logger.error(
+            "no approvers configured: %s names no approver and no manager, and JEAN_APPROVERS "
+            "is unset. jean will refuse every action that needs approval.",
+            settings.identity_path,
+        )
 
     routing = RoutingContext()
     server_mcp, tool_names, _tools = build_slack_mcp(

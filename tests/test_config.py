@@ -88,6 +88,23 @@ def test_external_paths_override(clean_env):
     assert settings.marketplace_token == "ghp_abc"
 
 
+def test_approvers_default_empty(clean_env):
+    assert Settings.load().approvers == ()
+
+
+def test_approvers_parsed_from_comma_separated_env(clean_env):
+    """The ops-level backstop: an approver set that does not depend on the LLM
+    extracting IDENTITY.md correctly."""
+    clean_env.setenv("JEAN_APPROVERS", "U11111, U22222")
+    assert Settings.load().approvers == ("U11111", "U22222")
+
+
+def test_approvers_rejects_a_non_slack_id(clean_env):
+    clean_env.setenv("JEAN_APPROVERS", "not-a-slack-id")
+    with pytest.raises(ValueError):
+        Settings.load()
+
+
 def test_db_pool_defaults_are_modest(clean_env):
     # jean shares a small managed Postgres with other apps; a worker must not
     # hog connection slots. Keep the default pool small enough that N workers

@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Annotated
 
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import field_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+from jean.persona.model import USER_ID_RE
 
 
 class Settings(BaseSettings):
@@ -33,6 +37,14 @@ class Settings(BaseSettings):
     home: Path = Path.home() / ".jean"
     idle_minutes: int = 15
     approval_ttl: int = 1800
+    # Ops-level approver backstop: JEAN_APPROVERS="U11111,U22222". Used only when
+    # IDENTITY.md yields no approver for an action (see approval/authz.py). It
+    # exists so a soul that fails to parse cannot leave jean with an approval
+    # nobody is authorized to click.
+    #
+    # NoDecode: pydantic-settings would otherwise JSON-decode a tuple field, and
+    # this one is written as a plain comma-separated list.
+    approvers: Annotated[tuple[str, ...], NoDecode] = ()
     permission_mode: str = "bypassPermissions"
     health_port: int = 8080
     model: str | None = None
@@ -49,6 +61,24 @@ class Settings(BaseSettings):
     # idle longer than the retention window. Set cleanup_enabled=false to skip.
     cleanup_enabled: bool = True
     cleanup_retention_days: int = 30
+
+    @field_validator("approvers", mode="before")
+    @classmethod
+    def _parse_approvers(cls, value: object) -> tuple[str, ...]:
+        """`JEAN_APPROVERS="U11111, U22222"` -> ("U11111", "U22222").
+
+        Validated here rather than trusted: these ids go straight into the set the
+        approval gate authorizes clicks against, so a typo must fail at boot, not
+        silently authorize nobody.
+        """
+        if value is None or value == "":
+            return ()
+        parts = value.split(",") if isinstance(value, str) else list(value)
+        ids = tuple(str(p).strip() for p in parts if str(p).strip())
+        for uid in ids:
+            if not USER_ID_RE.match(uid):
+                raise ValueError(f"invalid Slack user id in JEAN_APPROVERS: {uid!r}")
+        return ids
 
     @classmethod
     def load(cls) -> Settings:

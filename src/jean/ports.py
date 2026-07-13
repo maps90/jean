@@ -13,6 +13,7 @@ class SessionRow:
     permission_mode: str | None
     engaged: bool
     last_active_at: float
+    turn_seq: int = 0
 
 
 @dataclass
@@ -55,6 +56,23 @@ class SessionStore(Protocol):
     ) -> None: ...
     async def set_engaged(self, channel: str, thread_ts: str, value: bool) -> None: ...
     async def is_engaged(self, channel: str, thread_ts: str) -> bool: ...
+    async def bump_turn(self, channel: str, thread_ts: str) -> int: ...
+
+
+@runtime_checkable
+class TranscriptStore(Protocol):
+    """Durable home for a thread's claude-agent transcript -- the file the CLI
+    otherwise keeps only on the pod's local disk. Bytes in, bytes out: any
+    compression is the adapter's business, not the domain's.
+
+    `load` returns None unless the stored transcript belongs to `sdk_session_id`;
+    handing back another session's transcript would corrupt the thread's memory.
+    """
+
+    async def save(
+        self, channel: str, thread_ts: str, sdk_session_id: str, data: bytes
+    ) -> None: ...
+    async def load(self, channel: str, thread_ts: str, sdk_session_id: str) -> bytes | None: ...
 
 
 @runtime_checkable
@@ -75,10 +93,15 @@ class ApprovalCoordinator(Protocol):
 
 @runtime_checkable
 class MaintenanceStore(Protocol):
-    """Periodic retention cleanup. `prune` deletes rows older than a cutoff;
-    `try_claim_cleanup` gates a run so exactly one worker prunes each period."""
+    """Periodic retention cleanup. `prune` deletes rows older than the given
+    cutoffs -- sessions and approvals expire on separate schedules, because a
+    thread's memory going stale and an audit record aging out are different
+    concerns. `try_claim_cleanup` gates a run so exactly one worker prunes each
+    period."""
 
-    async def prune(self, older_than: float) -> PruneResult: ...
+    async def prune(
+        self, *, sessions_older_than: float, approvals_older_than: float
+    ) -> PruneResult: ...
     async def try_claim_cleanup(self, min_interval: float) -> bool: ...
 
 

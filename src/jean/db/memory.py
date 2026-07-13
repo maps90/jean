@@ -33,6 +33,7 @@ class MemoryStore:
         self._sessions: dict[tuple[str, str], SessionRow] = {}
         self._locks: dict[tuple[str, str], asyncio.Lock] = {}
         self._approvals: dict[str, _ApprovalRow] = {}
+        self._transcripts: dict[tuple[str, str], tuple[str, bytes]] = {}
         self._last_cleanup: float | None = None
 
     # ---- SessionStore ----
@@ -47,6 +48,7 @@ class MemoryStore:
             permission_mode=row.permission_mode,
             engaged=row.engaged,
             last_active_at=row.last_active_at,
+            turn_seq=row.turn_seq,
         )
 
     async def upsert_session(
@@ -74,6 +76,7 @@ class MemoryStore:
             last_active_at=(
                 time.time() if touch else (existing.last_active_at if existing else 0.0)
             ),
+            turn_seq=existing.turn_seq if existing else 0,
         )
         self._sessions[key] = row
 
@@ -83,6 +86,24 @@ class MemoryStore:
     async def is_engaged(self, channel: str, thread_ts: str) -> bool:
         row = self._sessions.get((channel, thread_ts))
         return bool(row and row.engaged)
+
+    async def bump_turn(self, channel: str, thread_ts: str) -> int:
+        key = (channel, thread_ts)
+        if key not in self._sessions:
+            await self.upsert_session(channel, thread_ts, touch=False)
+        row = self._sessions[key]
+        row.turn_seq += 1
+        return row.turn_seq
+
+    # ---- TranscriptStore ----
+    async def save(self, channel: str, thread_ts: str, sdk_session_id: str, data: bytes) -> None:
+        self._transcripts[(channel, thread_ts)] = (sdk_session_id, data)
+
+    async def load(self, channel: str, thread_ts: str, sdk_session_id: str) -> bytes | None:
+        stored = self._transcripts.get((channel, thread_ts))
+        if stored is None or stored[0] != sdk_session_id:
+            return None
+        return stored[1]
 
     # ---- ThreadLock ----
     def __call__(self, channel: str, thread_ts: str):
@@ -150,19 +171,26 @@ class MemoryStore:
         return True
 
     # ---- MaintenanceStore ----
-    async def prune(self, older_than: float) -> PruneResult:
+    async def prune(
+        self, *, sessions_older_than: float, approvals_older_than: float
+    ) -> PruneResult:
         # Resolved approvals (resolved_at set) whose resolution predates the
         # cutoff; pending rows have resolved_at=None and are never pruned.
         stale_appr = [
             aid
             for aid, row in self._approvals.items()
-            if row.resolved_at is not None and row.resolved_at < older_than
+            if row.resolved_at is not None and row.resolved_at < approvals_older_than
         ]
         for aid in stale_appr:
             del self._approvals[aid]
-        stale_sess = [key for key, row in self._sessions.items() if row.last_active_at < older_than]
+        stale_sess = [
+            key for key, row in self._sessions.items() if row.last_active_at < sessions_older_than
+        ]
         for key in stale_sess:
             del self._sessions[key]
+            # Mirrors the Postgres FK's ON DELETE CASCADE: a session's transcript
+            # never outlives the session.
+            self._transcripts.pop(key, None)
         return PruneResult(approvals_deleted=len(stale_appr), sessions_deleted=len(stale_sess))
 
     async def try_claim_cleanup(self, min_interval: float) -> bool:

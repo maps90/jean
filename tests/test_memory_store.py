@@ -11,10 +11,13 @@ from tests.store_behavior import (
     assert_coordinator_wait_unknown_id_denies_after_timeout,
     assert_prune_keeps_recent_rows,
     assert_prune_removes_resolved_approvals_and_stale_sessions,
+    assert_prune_uses_separate_windows_and_drops_transcripts,
     assert_session_roundtrip_and_engagement,
     assert_thread_lock_allows_different_threads,
     assert_thread_lock_serializes_same_thread,
+    assert_transcript_roundtrip,
     assert_try_claim_cleanup_gates_on_interval,
+    assert_turn_seq_increments,
 )
 
 
@@ -65,3 +68,15 @@ async def test_prune_keeps_recent_rows(store):
 
 async def test_try_claim_cleanup_gates_on_interval(store):
     await assert_try_claim_cleanup_gates_on_interval(store)
+
+
+async def test_turn_seq_increments(store):
+    await assert_turn_seq_increments(store)
+
+
+async def test_transcript_roundtrip(store):
+    await assert_transcript_roundtrip(store)
+
+
+async def test_prune_uses_separate_windows_and_drops_transcripts(store):
+    await assert_prune_uses_separate_windows_and_drops_transcripts(store)

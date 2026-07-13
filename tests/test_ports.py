@@ -27,6 +27,9 @@ class StubStore:
     async def is_engaged(self, channel, thread_ts):
         return False
 
+    async def bump_turn(self, channel, thread_ts):
+        return 1
+
 
 class StubCoordinator:
     async def create(self, approval_id, channel, thread_ts, summary):

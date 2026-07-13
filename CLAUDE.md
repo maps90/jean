@@ -37,18 +37,35 @@ jean runs as one or more identical worker processes behind a single Slack app. C
 never depends on a message reaching the same worker twice.
 
 - **Shared state in Postgres** (`asyncpg` pool): sessions (thread ↔ `sdk_session_id`,
-  permission_mode, engagement), and approvals. No durable state in process memory; the
-  in-process session map is only a best-effort per-worker cache.
-- **Sessions are resumable, but only best-effort:** any worker handles any message for a
-  thread by creating a `ClaudeSDKClient` with `resume=<stored sdk_session_id>`. A worker may
-  drop a client after idle; the next message (on any worker) resumes from Postgres.
-  Postgres holds the session *id*, though — the CLI holds the *transcript* it names, on
-  local disk. A restarted pod or a second replica resumes an id it cannot see, and the CLI
-  exits 1 at startup. So `JeanSession` falls back to a fresh session (no `resume`) when a
-  resume fails, and only when a resume fails: a startup failure that is not about the resume
-  id (bad `--plugin-dir`, bad auth) exits 1 identically, so the two are told apart by
-  outcome — if connecting *without* `resume` also fails, it was never the resume; propagate
-  and leave the stored id alone. Never distinguish them by parsing the CLI's stderr.
+  `turn_seq`, permission_mode, engagement), transcripts (gzipped `bytea`, FK'd to `sessions`
+  `ON DELETE CASCADE`), and approvals. No durable state in process memory; the in-process
+  session map is only a best-effort per-worker cache.
+- **Sessions are resumable, and the transcript travels with the id:** any worker handles any
+  message for a thread by creating a `ClaudeSDKClient` with `resume=<stored sdk_session_id>`.
+  The CLI resumes from a local `.jsonl` at `$HOME/.claude/projects/<slug(cwd)>/<id>.jsonl`
+  (slug = `cwd` with `/` and `.` replaced by `-`) — that file IS the session's state, and
+  dropping one into a project dir the CLI has never seen, then resuming by id, replays the
+  conversation. So before a cold connect (a worker that never handled this thread, or a
+  restarted pod), `JeanSession` materializes Postgres's copy onto its own disk first, and
+  archives its copy back to Postgres after every turn — that's what makes the resume succeed
+  across workers instead of silently starting fresh. The fresh-session fallback (no `resume`)
+  is now the *last resort*, for a transcript that is genuinely gone (e.g. expired by
+  retention), not the normal cross-worker path. Telling the two failures apart is still by
+  outcome, never by parsing stderr: a startup failure that is not about the resume id (bad
+  `--plugin-dir`, bad auth) exits 1 identically, so if connecting *without* `resume` also
+  fails, it was never the resume; propagate and leave the stored id alone.
+- **`turn_seq` guards a cached client against another worker's turn.** A cached
+  `ClaudeSDKClient` skips `_connect()` entirely, so it never re-reads the store. Every
+  completed turn bumps `sessions.turn_seq`; if a session's remembered `_seen_seq` disagrees
+  with the stored value, it drops the cached client and re-hydrates before the next turn —
+  otherwise it would answer from a history missing another worker's turn and archive that
+  over the good transcript. The bump happens *before* the archive: if the archive then failed,
+  the alternative order would leave the store holding a new transcript under an old
+  `turn_seq`, so another worker's cached client would wrongly believe itself current and
+  overwrite it — corruption. Bumping first turns that failure into losing at most one turn
+  from a coherent history; losing a turn beats corrupting a thread. The pod's local `.jsonl`
+  is deleted only once the store definitely has a copy — a DB outage must never destroy the
+  only copy of a transcript.
 - **Per-thread serialization across workers** via the `ThreadLock` port. The Postgres adapter
   uses `pg_advisory_xact_lock(hashtext(channel||':'||thread))` so two messages for one thread
   never run concurrently, even on different workers. Single-process fallback = `asyncio.Lock`.

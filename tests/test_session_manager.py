@@ -2,12 +2,18 @@ from __future__ import annotations
 
 import asyncio
 import time
+from pathlib import Path
 
 from jean.db.memory import MemoryStore
 from jean.session.manager import SessionManager
+from jean.session.session import JeanSession, RoutingContext
+from jean.session.transcript import LocalTranscripts
+from tests.test_session import FakeChat, FakeSdkClient
 
 
 class FakeSession:
+    busy = False
+
     def __init__(self, channel: str, thread_ts: str):
         self.channel = channel
         self.thread_ts = thread_ts
@@ -106,3 +112,68 @@ async def test_sweep_leaves_recently_active_sessions_alone():
 
     assert created[0].closed is False
     assert len(created) == 1
+
+
+async def test_sweep_never_closes_a_session_whose_turn_is_in_flight(tmp_path: Path):
+    """`_last_touch` is stamped BEFORE the turn, and a turn parked on a human
+    approval runs longer than idle_seconds (approval_ttl is 30 min, idle_minutes 15),
+    so "idle" does not mean "not running". Sweeping such a session tears down the
+    client and deletes the .jsonl the CLI child still has open: the turn then
+    archives nothing and the thread silently rewinds to its last archived turn."""
+    FakeSdkClient.instances.clear()
+    store, chat = MemoryStore(), FakeChat()
+    local = LocalTranscripts(cli_home=tmp_path, cwd=Path("/w"))
+    started, release = asyncio.Event(), asyncio.Event()
+
+    class ApprovalParkedClient(FakeSdkClient):
+        async def query(self, text: str) -> None:
+            await super().query(text)
+            # the CLI child appends to its transcript as the turn runs ...
+            line = b'{"turn":%d}\n' % len(self.queried)
+            local.write("sdk-session-abc", (local.read("sdk-session-abc") or b"") + line)
+            if len(self.queried) > 1:  # ... and turn 2 parks on a human approval
+                started.set()
+                await release.wait()
+
+    session = JeanSession(
+        "C1",
+        "111.0",
+        store=store,
+        chat=chat,
+        routing=RoutingContext(),
+        options_factory=lambda resume: {"resume": resume},
+        client_factory=lambda *, options: ApprovalParkedClient(options=options),
+        transcripts=store,
+        local=local,
+    )
+    manager = SessionManager(
+        session_factory=lambda channel, thread_ts: session,
+        lock=MemoryStore(),
+        idle_seconds=10,
+    )
+    key = ("C1", "111.0")
+
+    await manager.handle("C1", "111.0", "hello")  # turn 1 archives cleanly
+
+    turn = asyncio.create_task(manager.handle("C1", "111.0", "deploy prod?"))
+    await started.wait()
+    entered_at = manager._last_touch[key]
+
+    await manager.sweep(now=time.time() + 1_000_000)  # the idle sweeper fires mid-turn
+
+    assert session._client is not None, "the CLI child must survive its own turn"
+    assert manager._cache.get(key) is session  # left cached for a later sweep
+    assert local.read("sdk-session-abc") == b'{"turn":1}\n{"turn":2}\n'  # transcript intact
+
+    release.set()
+    await turn
+
+    # the turn finished on a live transcript and archived it
+    assert await store.load("C1", "111.0", "sdk-session-abc") == b'{"turn":1}\n{"turn":2}\n'
+    # a long turn must not come back already-idle
+    assert manager._last_touch[key] > entered_at
+
+    await manager.sweep(now=time.time() + 1_000_000)  # no longer busy -> now it goes
+
+    assert session._client is None
+    assert manager._cache.get(key) is None

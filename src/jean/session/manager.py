@@ -41,6 +41,11 @@ class SessionManager:
                 self._cache[key] = session
             self._last_touch[key] = time.time()
             await session.run_turn(text)
+            # Re-stamp AFTER the turn, not just before it: a turn that parked on a
+            # human approval can run for longer than idle_seconds, and an entry-only
+            # stamp would leave the session already idle the moment it finishes --
+            # swept before it ever gets to answer another message.
+            self._last_touch[key] = time.time()
 
     async def sweep(self, now: float | None = None) -> None:
         now = time.time() if now is None else now
@@ -48,7 +53,18 @@ class SessionManager:
             key for key, touched in self._last_touch.items() if now - touched > self._idle_seconds
         ]
         for key in idle_keys:
-            session = self._cache.pop(key, None)
+            session = self._cache.get(key)
+            # Never sweep a session whose turn is in flight. `_last_touch` is stamped
+            # before the turn, and a turn parked on a human approval outlives the idle
+            # window (approval_ttl 30min > idle_minutes 15) -- so "idle" here does not
+            # mean "not running". close() tears the client down and deletes the .jsonl
+            # the CLI child still has open: the turn would then archive nothing and the
+            # thread would silently rewind to its last archived turn. Leave it cached;
+            # a later sweep takes it once it is done. (No lock here: sweep must never
+            # block a turn, and the flag is only ever flipped by the session itself.)
+            if session is not None and session.busy:
+                continue
+            self._cache.pop(key, None)
             self._last_touch.pop(key, None)
             if session is not None:
                 await session.close()

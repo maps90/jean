@@ -106,6 +106,7 @@ class JeanSession:
         too, it was never the resume -- propagate, and leave the stored id
         alone.
         """
+        committed_seq = self._seen_seq  # the turn_seq THIS instance last committed
         row = await self._store.get_session(self._channel, self._thread_ts)
         resume = row.sdk_session_id if row else None
         self._seen_seq = row.turn_seq if row else 0
@@ -119,9 +120,24 @@ class JeanSession:
         # that, and it is trustworthy here: the staleness path in run_turn calls
         # close() before reconnecting, and close() deletes the local file whenever
         # it IS archived -- so a file that survives with `_archived False` is
-        # genuinely ours and genuinely ahead of the store.
+        # genuinely ours.
+        #
+        # Ours, but only *newer* while we are still the thread's most recent
+        # writer -- hence `turn_seq == committed_seq`. If the row has advanced past
+        # the seq we committed, another worker took a turn in between: it hydrated
+        # the store's copy (which lacks our un-archived turn), answered on top of
+        # it, and archived. Our file is then not ahead of the store, just a
+        # divergent branch, and resuming it would archive a history missing THEIR
+        # turn over theirs -- destroying an answer the user has already seen. The
+        # store's turn_seq is the authority: once it moves past us it is canonical,
+        # so we hydrate and swallow the loss of our own un-archived turn. Converging
+        # on the store costs one turn; the alternative is a lost update that can
+        # ping-pong between workers forever.
         local_is_newer = (
-            self._sid == resume and not self._archived and self._local.path(resume).exists()
+            self._sid == resume
+            and not self._archived
+            and self._seen_seq == committed_seq
+            and self._local.path(resume).exists()
         )
         hydrated = False
         if not local_is_newer:

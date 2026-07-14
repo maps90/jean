@@ -50,14 +50,17 @@ async def test_on_mention_sets_partner_and_dispatches():
 
 
 async def test_on_mention_blocked_author_is_ignored():
+    """A blocked user must not be able to hijack a thread by becoming its
+    partner, nor wipe an existing partner by getting engagement cleared."""
     gw, store, manager, _gate = _gateway(soul=_soul(blocked_users=["U66666"]))
+    await store.set_partner("C1", "111.0", "U11111")
 
     await gw.on_mention(
         channel="C1", thread_ts="111.0", text="hey <@UBOT> help me", author_id="U66666"
     )
 
-    assert await store.get_partner("C1", "111.0") is None
     assert manager.calls == []
+    assert await store.get_partner("C1", "111.0") == "U11111"
 
 
 async def test_on_message_skips_bot_mention_to_avoid_double_dispatch():

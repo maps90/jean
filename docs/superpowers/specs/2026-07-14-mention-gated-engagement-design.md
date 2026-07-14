@@ -71,8 +71,18 @@ user id of the thread's current partner, or `NULL` for nobody.
 
 Schema is created idempotently at boot, but the deployed database already holds
 the old column, so boot also runs
-`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS engaged_with text` and drops
-`engaged`.
+`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS engaged_with text`.
+
+*(Amended during implementation. The original design also dropped `engaged` here,
+but `_SCHEMA` runs at every worker boot, so the DROP would take effect the moment
+the first new pod connects — while a pod still running the previous image has an
+`upsert_session` that names `engaged` in its INSERT, which then fails with
+`UndefinedColumnError`. Worse, a rollback to that image would be permanently
+broken, because `CREATE TABLE IF NOT EXISTS` will not re-add a column to a table
+that already exists. The DROP is deferred instead: the dead `engaged` column stays
+in Postgres — it's `NOT NULL DEFAULT false`, so the new INSERT's omission of it
+succeeds on the default and costs nothing — until a later release, once no pod
+running the old image can exist.)*
 
 **Existing engagement state is deliberately not migrated.** The worst case is
 that a live thread forgets its partner and someone re-@-mentions anya once. That
@@ -82,8 +92,8 @@ does not justify a data migration.
 
 `SessionStore` swaps `set_engaged(bool)` / `is_engaged() -> bool` for
 `set_partner(user_id | None)` / `get_partner() -> str | None`. Both `db/memory.py`
-and `db/postgres.py` implement it; `Session.engaged: bool` becomes
-`Session.engaged_with: str | None`.
+and `db/postgres.py` implement it; `SessionRow.engaged: bool` becomes
+`SessionRow.engaged_with: str | None`.
 
 `gateway/engagement.py::decide()` takes `partner: str | None` in place of
 `engaged: bool`, and `Decision.engage: bool | None` becomes

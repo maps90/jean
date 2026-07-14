@@ -11,9 +11,9 @@ class SessionRow:
     thread_ts: str
     sdk_session_id: str | None
     permission_mode: str | None
-    engaged: bool
     last_active_at: float
     turn_seq: int = 0
+    engaged_with: str | None = None
 
 
 @dataclass
@@ -51,11 +51,10 @@ class SessionStore(Protocol):
         *,
         sdk_session_id: str | None = None,
         permission_mode: str | None = None,
-        engaged: bool | None = None,
         touch: bool = True,
     ) -> None: ...
-    async def set_engaged(self, channel: str, thread_ts: str, value: bool) -> None: ...
-    async def is_engaged(self, channel: str, thread_ts: str) -> bool: ...
+    async def set_partner(self, channel: str, thread_ts: str, user_id: str | None) -> None: ...
+    async def get_partner(self, channel: str, thread_ts: str) -> str | None: ...
     async def bump_turn(self, channel: str, thread_ts: str) -> int: ...
 
 

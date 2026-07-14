@@ -57,7 +57,7 @@ Copy `.env.example` to `.env` and fill in:
 | `JEAN_APPROVERS` | no | comma-separated Slack user ids (`U11111,U22222`) used **only** when `IDENTITY.md` names nobody who can approve a given action. A safety net for a soul that fails to parse -- see "Who gets asked" below |
 | `JEAN_IDLE_MINUTES`, `JEAN_APPROVAL_TTL`, `JEAN_PERMISSION_MODE`, `JEAN_HEALTH_PORT`, `JEAN_MODEL`, `JEAN_SOUL_PARSE_MODEL` | no | see `.env.example` for defaults |
 | `JEAN_CLEANUP_ENABLED` | no | Postgres retention cleanup (default: `true`). One worker per cycle prunes, via an advisory lock. |
-| `JEAN_SESSION_RETENTION_DAYS` | no | delete sessions idle longer than this (default: `3`). The session's transcript cascades away with the row — **and so do `engaged` and `permission_mode`**, so a thread that has been quiet this long needs a fresh `@jean` mention to re-engage. |
+| `JEAN_SESSION_RETENTION_DAYS` | no | delete sessions idle longer than this (default: `3`). The session's transcript cascades away with the row — **and so do `engaged_with` and `permission_mode`**, so a thread that has been quiet this long needs a fresh `@jean` mention to re-engage. |
 | `JEAN_APPROVAL_RETENTION_DAYS` | no | delete resolved approvals older than this (default: `30`) — the audit trail outlives the memory. Pending approvals are never pruned. |
 | `JEAN_CLEANUP_INTERVAL_HOURS` | no | how often the sweep runs (default: `24`) |
 | `JEAN_TRANSCRIPT_MAX_MB` | no | refuse to archive a transcript bigger than this (default: `32`), rather than let one pathological thread bloat the database. That thread keeps working, but only on the worker holding it — it won't resume elsewhere. |
@@ -149,10 +149,14 @@ storm.
 ## Using jean in Slack
 
 - **Mention it** (`@jean ...`) in any channel it's in, or **DM it directly**
-  -- both engage it in that thread.
-- Once engaged, jean keeps responding to follow-ups in the same thread until
-  someone else is mentioned instead (jean steps back) or the thread goes
-  idle.
+  -- either makes you jean's conversation partner in that thread.
+- As the partner, your plain follow-ups in the same thread keep getting
+  answered, no need to re-mention. Anyone else's messages are never
+  delivered to jean at all -- no turn, no tokens, no database write --
+  until they @-mention her themselves and take over as partner.
+- Only the partner can step jean back, by mentioning someone else
+  (`@budi can you take this?`); that hands the thread off and jean stays
+  quiet until she's mentioned again. That, or the thread goes idle.
 - `/mode <mode>` -- set this thread's permission mode (`default`,
   `acceptEdits`, `plan`, `bypassPermissions`, `dontAsk`, `auto`).
 - `/help` -- list available commands.

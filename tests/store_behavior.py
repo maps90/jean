@@ -12,10 +12,9 @@ import time
 import pytest
 
 
-async def assert_session_roundtrip_and_engagement(store) -> None:
+async def assert_session_roundtrip(store) -> None:
     channel, thread_ts = "C1", "111.222"
     assert await store.get_session(channel, thread_ts) is None
-    assert await store.is_engaged(channel, thread_ts) is False
 
     await store.upsert_session(channel, thread_ts, sdk_session_id="sdk-abc")
     row = await store.get_session(channel, thread_ts)
@@ -23,21 +22,43 @@ async def assert_session_roundtrip_and_engagement(store) -> None:
     assert row.channel == channel
     assert row.thread_ts == thread_ts
     assert row.sdk_session_id == "sdk-abc"
-    assert row.engaged is False
     assert row.last_active_at > 0
-
-    await store.set_engaged(channel, thread_ts, True)
-    assert await store.is_engaged(channel, thread_ts) is True
-    row = await store.get_session(channel, thread_ts)
-    assert row.engaged is True
-    # sdk_session_id must survive an update that doesn't touch it.
-    assert row.sdk_session_id == "sdk-abc"
+    touched_at = row.last_active_at
 
     await store.upsert_session(channel, thread_ts, permission_mode="plan", touch=False)
     row = await store.get_session(channel, thread_ts)
     assert row.permission_mode == "plan"
+    # sdk_session_id must survive an update that doesn't touch it.
     assert row.sdk_session_id == "sdk-abc"
-    assert row.engaged is True
+    # touch=False must PRESERVE the existing timestamp, not stamp a new one.
+    assert row.last_active_at == touched_at
+
+
+async def assert_partner_roundtrip(store) -> None:
+    """One conversation partner per thread. `None` means nobody -- and clearing
+    to `None` must be distinguishable from 'leave it alone', which is why this
+    is a dedicated setter rather than a field on upsert_session()."""
+    channel, thread_ts = "C9", "999.111"
+    assert await store.get_partner(channel, thread_ts) is None
+
+    await store.set_partner(channel, thread_ts, "U11111")
+    assert await store.get_partner(channel, thread_ts) == "U11111"
+    row = await store.get_session(channel, thread_ts)
+    assert row is not None
+    assert row.engaged_with == "U11111"
+
+    # A second mention hands the conversation to someone else.
+    await store.set_partner(channel, thread_ts, "U22222")
+    assert await store.get_partner(channel, thread_ts) == "U22222"
+
+    # Clearing to None is a real, storable state, not a no-op.
+    await store.set_partner(channel, thread_ts, None)
+    assert await store.get_partner(channel, thread_ts) is None
+
+    # The partner must survive an unrelated update that doesn't mention it.
+    await store.set_partner(channel, thread_ts, "U11111")
+    await store.upsert_session(channel, thread_ts, sdk_session_id="sdk-xyz", touch=False)
+    assert await store.get_partner(channel, thread_ts) == "U11111"
 
 
 async def assert_thread_lock_serializes_same_thread(lock) -> None:

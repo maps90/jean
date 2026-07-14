@@ -78,8 +78,15 @@ and `db/postgres.py` implement it; `Session.engaged: bool` becomes
 
 `gateway/engagement.py::decide()` takes `partner: str | None` in place of
 `engaged: bool`, and `Decision.engage: bool | None` becomes
-`Decision.partner: str | None | Unchanged` — it must express three outcomes: set
-a partner, clear the partner, leave it alone.
+`Decision.partner: str | None` — always the *resulting* partner, never a
+"leave it alone" sentinel. Since `decide()` already receives the current
+partner, the unchanged cases just return it back, which keeps the three
+outcomes (set / clear / unchanged) expressible in two states.
+
+`gateway/app.py` then writes to the store **only when
+`decision.partner != partner`**. This matters: it keeps an ignored message
+genuinely free — no turn *and* no database write — which is the entire point of
+the change.
 
 `gateway/app.py::on_mention` sets the partner to the author instead of setting a
 boolean. If Slack gives no author id, no partner is stored — that thread falls

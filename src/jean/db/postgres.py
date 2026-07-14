@@ -38,7 +38,16 @@ CREATE TABLE IF NOT EXISTS transcripts (
   FOREIGN KEY (channel, thread_ts) REFERENCES sessions(channel, thread_ts) ON DELETE CASCADE);
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS turn_seq bigint NOT NULL DEFAULT 0;
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS engaged_with text;
-ALTER TABLE sessions DROP COLUMN IF EXISTS engaged;
+-- Do NOT drop the dead `engaged` column yet, even though no code reads or
+-- writes it. _SCHEMA runs at every worker boot, so a DROP here takes effect
+-- the moment the first new pod connects -- while a pod still running the
+-- PREVIOUS image has an upsert_session() whose INSERT names `engaged`, so
+-- every session write on it would fail with UndefinedColumnError. Worse, a
+-- rollback to that image would then be permanently broken, because CREATE
+-- TABLE IF NOT EXISTS will not re-add a column to a table that already
+-- exists. Leaving it costs nothing: it's NOT NULL DEFAULT false, so the new
+-- code's INSERT (which omits it) succeeds on the default. Drop it in a later
+-- release, once no pod running the old image can exist.
 ALTER TABLE transcripts ALTER COLUMN data SET STORAGE EXTERNAL;
 """
 

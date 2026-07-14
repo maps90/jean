@@ -1,6 +1,6 @@
 # Mention-gated engagement
 
-**Status:** approved, not yet implemented
+**Status:** implemented on branch `mention-gated-engagement`
 **Date:** 2026-07-14
 
 ## Problem
@@ -115,7 +115,18 @@ talking to.
 *(Amended during implementation. The original rule stored `None`, which meant an
 unattributable or bot-authored event could* wipe *a live partner — the same
 bystander-interference hole through a different door. `register()`'s `app_mention`
-handler now also filters `subtype`/`bot_id`, as the `message` handler already did.)*
+handler now also drops messages carrying a `bot_id`, so another bot's "@anya look at
+this" no longer takes the partner slot. It deliberately does NOT filter on `subtype`
+the way the `message` handler does: a `file_share` — someone uploading a screenshot
+captioned "@anya what's wrong here" — is a real, addressed mention, and `app_mention`
+is the only handler that can serve it.)*
+
+Both entry points (`on_mention` and `on_message`) route through `decide()` via a shared
+`Gateway._engage`, so the blocked-user check and partner assignment have exactly one
+source of truth. An earlier cut re-implemented them inside `on_mention`, which left
+`decide()`'s bot-mention branch unreachable from the app — a trap for the next person to
+add channel-scoping to `decide()`, since the primary `@anya` path would have silently
+bypassed it.
 
 ### Prompt
 

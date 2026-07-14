@@ -71,17 +71,14 @@ class Gateway:
     async def on_mention(
         self, *, channel: str, thread_ts: str, text: str, author_id: str | None
     ) -> None:
-        """Owns bot-@mentions: the author becomes this thread's conversation partner,
-        then dispatch. Slack also delivers the same @mention as a plain `message`
-        event (see `on_message`, which skips bot-mentions to avoid running the turn
-        twice)."""
-        if author_id is not None and author_id in self._soul_provider().blocked_users:
-            return
-        if author_id is not None:
-            # An unattributable mention must not wipe an existing partner -- see
-            # the `author_id is None` handling in `decide()`.
-            await self._store.set_partner(channel, thread_ts, author_id)
-        await dispatch(self._manager, channel=channel, thread_ts=thread_ts, text=text)
+        """Owns bot-@mentions: routes through `decide()` so authorization (the
+        blocked-user check) and partner assignment have one source of truth,
+        shared with `on_message`. Slack also delivers the same @mention as a
+        plain `message` event (see `on_message`, which skips bot-mentions to
+        avoid running the turn twice)."""
+        await self._engage(
+            channel=channel, thread_ts=thread_ts, text=text, author_id=author_id, is_dm=False
+        )
 
     async def on_message(
         self, channel: str, thread_ts: str, text: str, author_id: str | None, is_dm: bool
@@ -90,6 +87,13 @@ class Gateway:
             # `on_mention` (app_mention event) already engages + dispatches
             # this turn; handling it here too would run it twice.
             return
+        await self._engage(
+            channel=channel, thread_ts=thread_ts, text=text, author_id=author_id, is_dm=is_dm
+        )
+
+    async def _engage(
+        self, *, channel: str, thread_ts: str, text: str, author_id: str | None, is_dm: bool
+    ) -> None:
         partner = await self._store.get_partner(channel, thread_ts)
         decision = decide(
             bot_id=self._bot_id,
@@ -136,7 +140,10 @@ def register(app: Any, gw: Gateway) -> None:
 
     @app.event("app_mention")
     async def _on_app_mention(event: dict) -> None:
-        if event.get("subtype") is not None or event.get("bot_id") is not None:
+        # Only drop other bots' @mentions here -- unlike `message`, a `subtype`
+        # (e.g. `file_share`, `thread_broadcast`) can still be a real, addressed
+        # mention and must reach `on_mention`.
+        if event.get("bot_id") is not None:
             return
         channel = event["channel"]
         thread_ts = event.get("thread_ts", event["ts"])

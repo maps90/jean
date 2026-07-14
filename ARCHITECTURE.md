@@ -146,7 +146,7 @@ whatever is on disk anyway and logs loudly, never failing the user's turn.
 
 Postgres holds four tables (created idempotently at boot):
 
-- `sessions(channel, thread_ts, sdk_session_id, turn_seq, permission_mode, engaged,
+- `sessions(channel, thread_ts, sdk_session_id, turn_seq, permission_mode, engaged_with,
   last_active_at, PRIMARY KEY (channel, thread_ts))`
 - `transcripts(channel, thread_ts, sdk_session_id, data, raw_bytes, updated_at,
   PRIMARY KEY (channel, thread_ts), FOREIGN KEY (channel, thread_ts) REFERENCES
@@ -167,7 +167,7 @@ the waiting side. The in-memory adapter mirrors these semantics so both are
 proven against the same behavioral test suite.
 
 Retention: sessions older than `JEAN_SESSION_RETENTION_DAYS` (default 3) are
-deleted — cascading away their transcript, `engaged`, and `permission_mode`, so a
+deleted — cascading away their transcript, `engaged_with`, and `permission_mode`, so a
 quiet thread needs a fresh `@`-mention to re-engage jean — and approvals older
 than `JEAN_APPROVAL_RETENTION_DAYS` (default 30) are deleted, on a sweep every
 `JEAN_CLEANUP_INTERVAL_HOURS` (default 24; a 3-day session window swept weekly

@@ -792,12 +792,22 @@ git commit -m "feat(persona): describe mention-gated engagement in the prompt"
 
 ## Deploy note
 
-Task 3 drops a column at boot (`_SCHEMA` runs on every worker start). During a
-`kubectl rollout restart`, an *old* pod still serving traffic will error on its next
-`upsert_session` once a new pod has dropped `sessions.engaged`. jean is a small
-deployment on a mutable `0.4.0` tag, so the exposure is the seconds between the new
-pod booting and the old one terminating. If that matters on the day, deploy with
-`strategy: Recreate` (or scale to zero, then up) instead of a rolling restart.
+**Superseded during execution — the `DROP COLUMN` was removed. Read this, not Task 3's
+Step 5.**
+
+Task 3 originally ran `ALTER TABLE sessions DROP COLUMN IF EXISTS engaged` in `_SCHEMA`,
+which executes at every worker boot. Review caught that this is worse than a transient
+rollout hiccup: an old pod's `upsert_session` names `engaged` in its INSERT, so it fails
+with `UndefinedColumnError` the moment a new pod drops the column — and a **rollback is
+permanently broken**, because the old image's `CREATE TABLE IF NOT EXISTS` will not
+re-add a column to a table that already exists. On a mutable `0.4.0` tag, rollback is
+exactly the escape hatch you'd reach for.
+
+So the DROP is deferred. The dead `engaged` column stays in Postgres: it is
+`NOT NULL DEFAULT false`, and the new `upsert_session` omits it, so writes succeed on the
+default and an old pod keeps working. Drop it in a later release, once no pod running the
+old image can exist. A fresh database never gets the column at all — the `CREATE TABLE`
+no longer declares it.
 
 Existing engagement state is deliberately not migrated. Live threads forget their
 partner; someone re-@-mentions anya once. That is the intended cost.

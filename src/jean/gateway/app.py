@@ -77,11 +77,14 @@ class Gateway:
         twice)."""
         if author_id is not None and author_id in self._soul_provider().blocked_users:
             return
-        await self._store.set_partner(channel, thread_ts, author_id)
+        if author_id is not None:
+            # An unattributable mention must not wipe an existing partner -- see
+            # the `author_id is None` handling in `decide()`.
+            await self._store.set_partner(channel, thread_ts, author_id)
         await dispatch(self._manager, channel=channel, thread_ts=thread_ts, text=text)
 
     async def on_message(
-        self, channel: str, thread_ts: str, text: str, author_id: str, is_dm: bool
+        self, channel: str, thread_ts: str, text: str, author_id: str | None, is_dm: bool
     ) -> None:
         if self._bot_id in mentions_in(text):
             # `on_mention` (app_mention event) already engages + dispatches
@@ -133,6 +136,8 @@ def register(app: Any, gw: Gateway) -> None:
 
     @app.event("app_mention")
     async def _on_app_mention(event: dict) -> None:
+        if event.get("subtype") is not None or event.get("bot_id") is not None:
+            return
         channel = event["channel"]
         thread_ts = event.get("thread_ts", event["ts"])
         await gw.on_mention(
@@ -149,7 +154,7 @@ def register(app: Any, gw: Gateway) -> None:
         channel = event["channel"]
         thread_ts = event.get("thread_ts", event["ts"])
         is_dm = event.get("channel_type") == "im"
-        await gw.on_message(channel, thread_ts, event.get("text", ""), event.get("user", ""), is_dm)
+        await gw.on_message(channel, thread_ts, event.get("text", ""), event.get("user"), is_dm)
 
     @app.action(ACTION_RE)
     async def _on_action(ack: Callable, body: dict, client: Any) -> None:

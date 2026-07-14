@@ -115,6 +115,7 @@ async def test_dm_message_always_handled_and_sets_partner():
 
 
 async def test_mention_of_someone_else_clears_the_partner():
+    """The handoff: the partner herself says "@budi can you take this?"."""
     gw, store, manager, _gate = _gateway()
     await store.set_partner("C1", "111.0", "U11111")
 
@@ -124,13 +125,45 @@ async def test_mention_of_someone_else_clears_the_partner():
     assert manager.calls == []
 
 
+async def test_bystander_mentioning_someone_else_does_not_clear_the_partner():
+    """A bystander's mention of a third party must not disengage jean from the
+    real partner's conversation -- and the partner's next plain follow-up must
+    still be handled."""
+    gw, store, manager, _gate = _gateway()
+    await store.set_partner("C1", "111.0", "U11111")
+
+    await gw.on_message("C1", "111.0", "hey <@U33333> can you look at this", "U22222", False)
+
+    assert await store.get_partner("C1", "111.0") == "U11111"
+    assert manager.calls == []
+
+    await gw.on_message("C1", "111.0", "follow-up message", "U11111", False)
+    assert manager.calls == [("C1", "111.0", "follow-up message")]
+
+
+async def test_on_mention_with_unknown_author_leaves_the_partner_unchanged():
+    """An unattributable mention must not wipe an existing partner -- it just
+    handles the turn."""
+    gw, store, manager, _gate = _gateway()
+    await store.set_partner("C1", "111.0", "U11111")
+
+    await gw.on_mention(channel="C1", thread_ts="111.0", text="hey <@UBOT>", author_id=None)
+
+    assert await store.get_partner("C1", "111.0") == "U11111"
+    assert manager.calls == [("C1", "111.0", "hey <@UBOT>")]
+
+
 async def test_blocked_author_is_ignored():
+    """A blocked user posting must not hijack the thread: the real partner
+    (U11111) stays the partner, even though the blocked author (U66666) is
+    someone else entirely."""
     gw, store, manager, _gate = _gateway(soul=_soul(blocked_users=["U66666"]))
-    await store.set_partner("C1", "111.0", "U66666")
+    await store.set_partner("C1", "111.0", "U11111")
 
     await gw.on_message("C1", "111.0", "anything", "U66666", False)
 
     assert manager.calls == []
+    assert await store.get_partner("C1", "111.0") == "U11111"
 
 
 async def test_ignored_message_does_not_write_to_the_store():

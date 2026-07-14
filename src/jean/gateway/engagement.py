@@ -48,18 +48,25 @@ def decide(
         return Decision(handle=False, partner=partner)
 
     if is_dm:
-        return Decision(handle=True, partner=author_id)
+        # An unattributable event must not mutate the partner: fall back to the
+        # existing one rather than wiping it with `None`.
+        return Decision(handle=True, partner=author_id if author_id is not None else partner)
 
     mentions = mentions_in(text)
     if bot_id in mentions:
         # Most recent mention wins: whoever addresses her is who she's talking to.
-        # An unknown author leaves no partner, so the thread falls back to strict
-        # mention-only rather than to a stale or wrong one.
-        return Decision(handle=True, partner=author_id)
+        # An unattributable author leaves the existing partner alone rather than
+        # wiping it -- an anonymous or bot-authored event must not clear it.
+        return Decision(handle=True, partner=author_id if author_id is not None else partner)
 
     if mentions:
-        # Someone else was addressed in this thread -- jean steps back.
-        return Decision(handle=False, partner=None)
+        # Someone else was addressed. Only the current partner can disengage her
+        # this way (the handoff: "@budi can you take this?") -- a bystander
+        # mentioning anyone else is as inert as their plain chatter and must not
+        # touch the partner.
+        if author_id is not None and author_id == partner:
+            return Decision(handle=False, partner=None)
+        return Decision(handle=False, partner=partner)
 
     if author_id is not None and author_id == partner:
         # The partner's plain follow-up: no re-@mention needed.

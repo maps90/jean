@@ -30,8 +30,17 @@ In a channel thread, in order:
 2. Text @-mentions anya → handle. The author becomes this thread's partner.
    The most recent mention wins, so a second person can take over the
    conversation simply by mentioning her.
-3. Text @-mentions someone else, and not anya → ignore, and clear the partner.
-   She steps back from the thread. *(unchanged behaviour, existing code)*
+3. Text @-mentions someone else, and not anya → ignore. **And if the author is the
+   current partner, clear the partner** — she steps back, because the person she was
+   helping has handed the thread to a human. A *bystander* mentioning someone else
+   leaves the partner untouched.
+
+   *(Amended during implementation. The original rule — inherited from the old code —
+   cleared the partner regardless of who wrote the message, which let a bystander
+   silently disengage anya from someone else's live conversation. That contradicts the
+   invariant this whole feature rests on: nothing a bystander does may change the
+   thread's engagement state. Bystanders are now inert in both directions — they cannot
+   make her speak, and they cannot make her stop.)*
 4. No mentions, and the author **is** the partner → handle. Partner unchanged.
    This is the friction-free follow-up: you don't re-@ her every line.
 5. Otherwise → **ignore.** This is the new rule and the whole point. A plain
@@ -89,8 +98,14 @@ genuinely free — no turn *and* no database write — which is the entire point
 the change.
 
 `gateway/app.py::on_mention` sets the partner to the author instead of setting a
-boolean. If Slack gives no author id, no partner is stored — that thread falls
-back to strict mention-only, which is the safe direction.
+boolean. If Slack gives no author id, the turn is still handled but the partner is
+left **unchanged** — an event we cannot attribute must not mutate who anya is
+talking to.
+
+*(Amended during implementation. The original rule stored `None`, which meant an
+unattributable or bot-authored event could* wipe *a live partner — the same
+bystander-interference hole through a different door. `register()`'s `app_mention`
+handler now also filters `subtype`/`bot_id`, as the `message` handler already did.)*
 
 ### Prompt
 

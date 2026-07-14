@@ -35,6 +35,12 @@ class StubStore:
     async def is_engaged(self, channel, thread_ts):
         return False
 
+    async def set_partner(self, channel, thread_ts, user_id):
+        return None
+
+    async def get_partner(self, channel, thread_ts):
+        return None
+
     async def bump_turn(self, channel, thread_ts):
         return 1
 

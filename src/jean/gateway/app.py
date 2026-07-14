@@ -71,12 +71,13 @@ class Gateway:
     async def on_mention(
         self, *, channel: str, thread_ts: str, text: str, author_id: str | None
     ) -> None:
-        """Owns bot-@mentions: engage + dispatch. Slack also delivers the same
-        @mention as a plain `message` event (see `on_message`, which skips
-        bot-mentions to avoid running the turn twice)."""
+        """Owns bot-@mentions: the author becomes this thread's conversation partner,
+        then dispatch. Slack also delivers the same @mention as a plain `message`
+        event (see `on_message`, which skips bot-mentions to avoid running the turn
+        twice)."""
         if author_id is not None and author_id in self._soul_provider().blocked_users:
             return
-        await self._store.set_engaged(channel, thread_ts, True)
+        await self._store.set_partner(channel, thread_ts, author_id)
         await dispatch(self._manager, channel=channel, thread_ts=thread_ts, text=text)
 
     async def on_message(
@@ -86,7 +87,7 @@ class Gateway:
             # `on_mention` (app_mention event) already engages + dispatches
             # this turn; handling it here too would run it twice.
             return
-        engaged = await self._store.is_engaged(channel, thread_ts)
+        partner = await self._store.get_partner(channel, thread_ts)
         decision = decide(
             bot_id=self._bot_id,
             channel=channel,
@@ -94,11 +95,13 @@ class Gateway:
             text=text,
             is_dm=is_dm,
             soul=self._soul_provider(),
-            engaged=engaged,
+            partner=partner,
             author_id=author_id,
         )
-        if decision.engage is not None:
-            await self._store.set_engaged(channel, thread_ts, decision.engage)
+        # Write only on a real change: a bystander's message must cost nothing --
+        # no turn, and no database write either.
+        if decision.partner != partner:
+            await self._store.set_partner(channel, thread_ts, decision.partner)
         if decision.handle:
             await dispatch(self._manager, channel=channel, thread_ts=thread_ts, text=text)
 

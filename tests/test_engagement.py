@@ -32,14 +32,14 @@ def test_blocked_author_is_dropped():
         text="hello",
         is_dm=False,
         soul=soul,
-        engaged=True,
+        partner="U66666",
         author_id="U66666",
     )
     assert d.handle is False
-    assert d.engage is None
+    assert d.partner == "U66666"  # unchanged -- blocking is not disengaging
 
 
-def test_dm_always_handles_and_engages():
+def test_dm_always_handles_and_takes_the_author_as_partner():
     soul = _soul()
     d = decide(
         bot_id="UBOT",
@@ -48,14 +48,14 @@ def test_dm_always_handles_and_engages():
         text="hello",
         is_dm=True,
         soul=soul,
-        engaged=False,
+        partner=None,
         author_id="U11111",
     )
     assert d.handle is True
-    assert d.engage is True
+    assert d.partner == "U11111"
 
 
-def test_mention_of_bot_handles_and_engages():
+def test_mention_of_bot_handles_and_makes_the_mentioner_the_partner():
     soul = _soul()
     d = decide(
         bot_id="UBOT",
@@ -64,14 +64,30 @@ def test_mention_of_bot_handles_and_engages():
         text="hey <@UBOT> help me",
         is_dm=False,
         soul=soul,
-        engaged=False,
+        partner=None,
         author_id="U11111",
     )
     assert d.handle is True
-    assert d.engage is True
+    assert d.partner == "U11111"
 
 
-def test_mention_of_someone_else_disengages_and_does_not_handle():
+def test_mention_by_a_second_person_takes_over_the_conversation():
+    soul = _soul()
+    d = decide(
+        bot_id="UBOT",
+        channel="C1",
+        thread_ts="1.0",
+        text="<@UBOT> actually, over here",
+        is_dm=False,
+        soul=soul,
+        partner="U11111",
+        author_id="U22222",
+    )
+    assert d.handle is True
+    assert d.partner == "U22222"
+
+
+def test_mention_of_someone_else_clears_the_partner_and_does_not_handle():
     soul = _soul()
     d = decide(
         bot_id="UBOT",
@@ -80,30 +96,47 @@ def test_mention_of_someone_else_disengages_and_does_not_handle():
         text="hey <@U22222> can you help",
         is_dm=False,
         soul=soul,
-        engaged=True,
+        partner="U11111",
         author_id="U11111",
     )
     assert d.handle is False
-    assert d.engage is False
+    assert d.partner is None
 
 
-def test_plain_reply_while_engaged_handles():
+def test_plain_follow_up_from_the_partner_is_handled():
     soul = _soul()
     d = decide(
         bot_id="UBOT",
         channel="C1",
         thread_ts="1.0",
-        text="continuing the conversation",
+        text="ok now restart it",
         is_dm=False,
         soul=soul,
-        engaged=True,
+        partner="U11111",
         author_id="U11111",
     )
     assert d.handle is True
-    assert d.engage is None
+    assert d.partner == "U11111"
 
 
-def test_plain_reply_while_not_engaged_is_ignored():
+def test_plain_message_from_a_non_partner_is_ignored():
+    """The whole point of the feature: Budi's aside to Dimas costs no turn."""
+    soul = _soul()
+    d = decide(
+        bot_id="UBOT",
+        channel="C1",
+        thread_ts="1.0",
+        text="that started after friday's deploy",
+        is_dm=False,
+        soul=soul,
+        partner="U11111",
+        author_id="U22222",
+    )
+    assert d.handle is False
+    assert d.partner == "U11111"  # unchanged: Dimas is still the partner
+
+
+def test_plain_message_with_no_partner_is_ignored():
     soul = _soul()
     d = decide(
         bot_id="UBOT",
@@ -112,11 +145,11 @@ def test_plain_reply_while_not_engaged_is_ignored():
         text="random chatter",
         is_dm=False,
         soul=soul,
-        engaged=False,
+        partner=None,
         author_id="U11111",
     )
     assert d.handle is False
-    assert d.engage is None
+    assert d.partner is None
 
 
 def test_mention_of_bot_takes_priority_over_mention_of_others():
@@ -128,8 +161,26 @@ def test_mention_of_bot_takes_priority_over_mention_of_others():
         text="hey <@UBOT> and <@U22222>",
         is_dm=False,
         soul=soul,
-        engaged=False,
+        partner=None,
         author_id="U11111",
     )
     assert d.handle is True
-    assert d.engage is True
+    assert d.partner == "U11111"
+
+
+def test_mention_with_unknown_author_stores_no_partner():
+    """Slack gave us no author id -- handle the mention, but store no partner, so
+    the thread falls back to strict mention-only rather than to a wrong partner."""
+    soul = _soul()
+    d = decide(
+        bot_id="UBOT",
+        channel="C1",
+        thread_ts="1.0",
+        text="<@UBOT> hi",
+        is_dm=False,
+        soul=soul,
+        partner="U11111",
+        author_id=None,
+    )
+    assert d.handle is True
+    assert d.partner is None

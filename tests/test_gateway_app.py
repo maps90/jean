@@ -38,14 +38,14 @@ def _gateway(store=None, manager=None, gate=None, soul=None, bot_id="UBOT"):
     return gw, store, manager, gate
 
 
-async def test_on_mention_engages_and_dispatches():
+async def test_on_mention_sets_partner_and_dispatches():
     gw, store, manager, _gate = _gateway()
 
     await gw.on_mention(
         channel="C1", thread_ts="111.0", text="hey <@UBOT> help me", author_id="U11111"
     )
 
-    assert await store.is_engaged("C1", "111.0") is True
+    assert await store.get_partner("C1", "111.0") == "U11111"
     assert manager.calls == [("C1", "111.0", "hey <@UBOT> help me")]
 
 
@@ -56,7 +56,7 @@ async def test_on_mention_blocked_author_is_ignored():
         channel="C1", thread_ts="111.0", text="hey <@UBOT> help me", author_id="U66666"
     )
 
-    assert await store.is_engaged("C1", "111.0") is False
+    assert await store.get_partner("C1", "111.0") is None
     assert manager.calls == []
 
 
@@ -68,48 +68,89 @@ async def test_on_message_skips_bot_mention_to_avoid_double_dispatch():
     await gw.on_message("C1", "111.0", "hey <@UBOT> help me", "U11111", False)
 
     assert manager.calls == []
-    assert await store.is_engaged("C1", "111.0") is False
+    assert await store.get_partner("C1", "111.0") is None
 
 
-async def test_plain_message_ignored_until_engaged():
+async def test_partner_follow_up_handled_but_a_bystander_is_ignored():
+    """The end-to-end shape of the feature: after Dimas mentions her, his plain
+    follow-ups run and Budi's asides do not."""
     gw, store, manager, _gate = _gateway()
 
     await gw.on_message("C1", "111.0", "just chatting", "U11111", False)
-    assert manager.calls == []
+    assert manager.calls == []  # nobody has addressed her yet
 
     await gw.on_mention(channel="C1", thread_ts="111.0", text="hey <@UBOT>", author_id="U11111")
     manager.calls.clear()
 
+    await gw.on_message("C1", "111.0", "budi's aside", "U22222", False)
+    assert manager.calls == []  # not the partner -> no turn
+
     await gw.on_message("C1", "111.0", "follow-up message", "U11111", False)
     assert manager.calls == [("C1", "111.0", "follow-up message")]
+    assert await store.get_partner("C1", "111.0") == "U11111"
 
 
-async def test_dm_message_always_handled_and_engages():
+async def test_mention_by_a_second_person_takes_over_the_conversation():
+    gw, store, manager, _gate = _gateway()
+    await store.set_partner("C1", "111.0", "U11111")
+
+    await gw.on_mention(
+        channel="C1", thread_ts="111.0", text="<@UBOT> over here", author_id="U22222"
+    )
+
+    assert await store.get_partner("C1", "111.0") == "U22222"
+    # And now the old partner's plain message is the one that gets ignored.
+    manager.calls.clear()
+    await gw.on_message("C1", "111.0", "wait, what about my thing", "U11111", False)
+    assert manager.calls == []
+
+
+async def test_dm_message_always_handled_and_sets_partner():
     gw, store, manager, _gate = _gateway()
 
     await gw.on_message("D1", "111.0", "hi jean", "U11111", True)
 
-    assert await store.is_engaged("D1", "111.0") is True
+    assert await store.get_partner("D1", "111.0") == "U11111"
     assert manager.calls == [("D1", "111.0", "hi jean")]
 
 
-async def test_mention_of_someone_else_disengages():
+async def test_mention_of_someone_else_clears_the_partner():
     gw, store, manager, _gate = _gateway()
-    await store.set_engaged("C1", "111.0", True)
+    await store.set_partner("C1", "111.0", "U11111")
 
     await gw.on_message("C1", "111.0", "hey <@U22222>", "U11111", False)
 
-    assert await store.is_engaged("C1", "111.0") is False
+    assert await store.get_partner("C1", "111.0") is None
     assert manager.calls == []
 
 
 async def test_blocked_author_is_ignored():
     gw, store, manager, _gate = _gateway(soul=_soul(blocked_users=["U66666"]))
-    await store.set_engaged("C1", "111.0", True)
+    await store.set_partner("C1", "111.0", "U66666")
 
     await gw.on_message("C1", "111.0", "anything", "U66666", False)
 
     assert manager.calls == []
+
+
+async def test_ignored_message_does_not_write_to_the_store():
+    """An ignored message must cost nothing -- no turn AND no write. If this
+    regresses, every bystander's message silently starts hitting the database."""
+    gw, store, manager, _gate = _gateway()
+    await store.set_partner("C1", "111.0", "U11111")
+    writes: list[str | None] = []
+    original = store.set_partner
+
+    async def spy(channel, thread_ts, user_id):
+        writes.append(user_id)
+        await original(channel, thread_ts, user_id)
+
+    store.set_partner = spy
+
+    await gw.on_message("C1", "111.0", "budi's aside", "U22222", False)
+
+    assert manager.calls == []
+    assert writes == []
 
 
 async def test_on_action_delegates_to_gate():

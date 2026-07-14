@@ -12,7 +12,6 @@ _SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (
   channel text NOT NULL, thread_ts text NOT NULL,
   sdk_session_id text, permission_mode text,
-  engaged boolean NOT NULL DEFAULT false,
   last_active_at double precision NOT NULL DEFAULT 0,
   PRIMARY KEY (channel, thread_ts));
 CREATE TABLE IF NOT EXISTS approvals (
@@ -38,6 +37,17 @@ CREATE TABLE IF NOT EXISTS transcripts (
   PRIMARY KEY (channel, thread_ts),
   FOREIGN KEY (channel, thread_ts) REFERENCES sessions(channel, thread_ts) ON DELETE CASCADE);
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS turn_seq bigint NOT NULL DEFAULT 0;
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS engaged_with text;
+-- Do NOT drop the dead `engaged` column yet, even though no code reads or
+-- writes it. _SCHEMA runs at every worker boot, so a DROP here takes effect
+-- the moment the first new pod connects -- while a pod still running the
+-- PREVIOUS image has an upsert_session() whose INSERT names `engaged`, so
+-- every session write on it would fail with UndefinedColumnError. Worse, a
+-- rollback to that image would then be permanently broken, because CREATE
+-- TABLE IF NOT EXISTS will not re-add a column to a table that already
+-- exists. Leaving it costs nothing: it's NOT NULL DEFAULT false, so the new
+-- code's INSERT (which omits it) succeeds on the default. Drop it in a later
+-- release, once no pod running the old image can exist.
 ALTER TABLE transcripts ALTER COLUMN data SET STORAGE EXTERNAL;
 """
 
@@ -86,9 +96,9 @@ class PostgresStore:
                 thread_ts=r["thread_ts"],
                 sdk_session_id=r["sdk_session_id"],
                 permission_mode=r["permission_mode"],
-                engaged=r["engaged"],
                 last_active_at=r["last_active_at"],
                 turn_seq=r["turn_seq"],
+                engaged_with=r["engaged_with"],
             )
         )
 
@@ -99,35 +109,42 @@ class PostgresStore:
         *,
         sdk_session_id: str | None = None,
         permission_mode: str | None = None,
-        engaged: bool | None = None,
         touch: bool = True,
     ) -> None:
         # COALESCE keeps existing values when a field is not being changed.
         await self._pool.execute(
-            """INSERT INTO sessions(channel,thread_ts,sdk_session_id,permission_mode,engaged,last_active_at)
-               VALUES($1,$2,$3,$4,COALESCE($5,false),
-                      CASE WHEN $6 THEN extract(epoch from now()) ELSE 0 END)
+            """INSERT INTO sessions(channel,thread_ts,sdk_session_id,permission_mode,last_active_at)
+               VALUES($1,$2,$3,$4,
+                      CASE WHEN $5 THEN extract(epoch from now()) ELSE 0 END)
                ON CONFLICT(channel,thread_ts) DO UPDATE SET
                  sdk_session_id=COALESCE($3, sessions.sdk_session_id),
                  permission_mode=COALESCE($4, sessions.permission_mode),
-                 engaged=COALESCE($5, sessions.engaged),
-                 last_active_at=CASE WHEN $6 THEN extract(epoch from now()) ELSE sessions.last_active_at END""",
+                 last_active_at=CASE WHEN $5 THEN extract(epoch from now()) ELSE sessions.last_active_at END""",
             channel,
             thread_ts,
             sdk_session_id,
             permission_mode,
-            engaged,
             touch,
         )
 
-    async def set_engaged(self, channel: str, thread_ts: str, value: bool) -> None:
-        await self.upsert_session(channel, thread_ts, engaged=value, touch=False)
-
-    async def is_engaged(self, channel: str, thread_ts: str) -> bool:
-        v = await self._pool.fetchval(
-            "SELECT engaged FROM sessions WHERE channel=$1 AND thread_ts=$2", channel, thread_ts
+    async def set_partner(self, channel: str, thread_ts: str, user_id: str | None) -> None:
+        # A plain assignment, not COALESCE: $3 = NULL must clear the partner, not
+        # mean "keep what's there".
+        await self._pool.execute(
+            """INSERT INTO sessions(channel,thread_ts,engaged_with,last_active_at)
+               VALUES($1,$2,$3,0)
+               ON CONFLICT(channel,thread_ts) DO UPDATE SET engaged_with=$3""",
+            channel,
+            thread_ts,
+            user_id,
         )
-        return bool(v)
+
+    async def get_partner(self, channel: str, thread_ts: str) -> str | None:
+        return await self._pool.fetchval(
+            "SELECT engaged_with FROM sessions WHERE channel=$1 AND thread_ts=$2",
+            channel,
+            thread_ts,
+        )
 
     async def bump_turn(self, channel: str, thread_ts: str) -> int:
         # INSERT..ON CONFLICT so a bump on a thread with no row yet still works;
@@ -181,7 +198,7 @@ class PostgresStore:
     # ---- ThreadLock ----  advisory *xact* lock auto-releases on tx end.
     # This is held for the ENTIRE agent turn (per-thread serialization across
     # workers), so it must NOT be drawn from the shared query pool -- doing so
-    # would starve short queries (upsert_session/is_engaged/...) and, worse,
+    # would starve short queries (upsert_session/get_partner/...) and, worse,
     # ApprovalCoordinator.wait()'s own pool.acquire() once enough threads are
     # mid-turn (a pool-exhaustion deadlock). Use a dedicated connection instead.
     def __call__(self, channel: str, thread_ts: str):

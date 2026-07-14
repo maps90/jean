@@ -17,11 +17,12 @@ from tests.store_behavior import (  # noqa: E402
     assert_coordinator_stores_approvers_and_pending,
     assert_coordinator_timeout_denies,
     assert_coordinator_wait_unknown_id_denies_after_timeout,
+    assert_partner_roundtrip,
     assert_prune_keeps_recent_rows,
     assert_prune_removes_resolved_approvals_and_stale_sessions,
     assert_prune_uses_separate_windows_and_drops_transcripts,
     assert_save_requires_an_existing_session,
-    assert_session_roundtrip_and_engagement,
+    assert_session_roundtrip,
     assert_thread_lock_allows_different_threads,
     assert_thread_lock_serializes_same_thread,
     assert_transcript_roundtrip,
@@ -48,8 +49,12 @@ async def test_ping(store):
     assert await store.ping() is True
 
 
-async def test_session_roundtrip_and_engagement(store):
-    await assert_session_roundtrip_and_engagement(store)
+async def test_session_roundtrip(store):
+    await assert_session_roundtrip(store)
+
+
+async def test_partner_roundtrip(store):
+    await assert_partner_roundtrip(store)
 
 
 async def test_thread_lock_serializes_same_thread(store):
@@ -168,7 +173,7 @@ async def test_locks_do_not_starve_pool_or_approval_wait(store):
         await asyncio.wait_for(asyncio.gather(*(e.wait() for e in entered)), timeout=5)
 
         # A short query must still complete promptly while all locks are held.
-        assert await asyncio.wait_for(store.is_engaged("C1", "111.0"), timeout=2) is False
+        assert await asyncio.wait_for(store.get_partner("C1", "111.0"), timeout=2) is None
 
         aid = f"appr-starve-{_uid()}"
         await store.create(aid, "C1", "111.0", "should not starve")

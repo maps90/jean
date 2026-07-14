@@ -50,6 +50,7 @@ class MemoryStore:
             engaged=row.engaged,
             last_active_at=row.last_active_at,
             turn_seq=row.turn_seq,
+            engaged_with=row.engaged_with,
         )
 
     async def upsert_session(
@@ -78,6 +79,7 @@ class MemoryStore:
                 time.time() if touch else (existing.last_active_at if existing else 0.0)
             ),
             turn_seq=existing.turn_seq if existing else 0,
+            engaged_with=existing.engaged_with if existing else None,
         )
         self._sessions[key] = row
 
@@ -87,6 +89,19 @@ class MemoryStore:
     async def is_engaged(self, channel: str, thread_ts: str) -> bool:
         row = self._sessions.get((channel, thread_ts))
         return bool(row and row.engaged)
+
+    async def set_partner(self, channel: str, thread_ts: str, user_id: str | None) -> None:
+        # Not routed through upsert_session: `None` there means "leave unchanged",
+        # but here it means "clear the partner" -- a real state we must be able to
+        # write.
+        key = (channel, thread_ts)
+        if key not in self._sessions:
+            await self.upsert_session(channel, thread_ts, touch=False)
+        self._sessions[key].engaged_with = user_id
+
+    async def get_partner(self, channel: str, thread_ts: str) -> str | None:
+        row = self._sessions.get((channel, thread_ts))
+        return row.engaged_with if row else None
 
     async def bump_turn(self, channel: str, thread_ts: str) -> int:
         # A newly created row must be touched (last_active_at=now), not left at

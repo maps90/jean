@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS transcripts (
   PRIMARY KEY (channel, thread_ts),
   FOREIGN KEY (channel, thread_ts) REFERENCES sessions(channel, thread_ts) ON DELETE CASCADE);
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS turn_seq bigint NOT NULL DEFAULT 0;
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS engaged_with text;
 ALTER TABLE transcripts ALTER COLUMN data SET STORAGE EXTERNAL;
 """
 
@@ -89,6 +90,7 @@ class PostgresStore:
                 engaged=r["engaged"],
                 last_active_at=r["last_active_at"],
                 turn_seq=r["turn_seq"],
+                engaged_with=r["engaged_with"],
             )
         )
 
@@ -128,6 +130,25 @@ class PostgresStore:
             "SELECT engaged FROM sessions WHERE channel=$1 AND thread_ts=$2", channel, thread_ts
         )
         return bool(v)
+
+    async def set_partner(self, channel: str, thread_ts: str, user_id: str | None) -> None:
+        # A plain assignment, not COALESCE: $3 = NULL must clear the partner, not
+        # mean "keep what's there".
+        await self._pool.execute(
+            """INSERT INTO sessions(channel,thread_ts,engaged_with,last_active_at)
+               VALUES($1,$2,$3,0)
+               ON CONFLICT(channel,thread_ts) DO UPDATE SET engaged_with=$3""",
+            channel,
+            thread_ts,
+            user_id,
+        )
+
+    async def get_partner(self, channel: str, thread_ts: str) -> str | None:
+        return await self._pool.fetchval(
+            "SELECT engaged_with FROM sessions WHERE channel=$1 AND thread_ts=$2",
+            channel,
+            thread_ts,
+        )
 
     async def bump_turn(self, channel: str, thread_ts: str) -> int:
         # INSERT..ON CONFLICT so a bump on a thread with no row yet still works;

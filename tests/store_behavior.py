@@ -23,12 +23,15 @@ async def assert_session_roundtrip(store) -> None:
     assert row.thread_ts == thread_ts
     assert row.sdk_session_id == "sdk-abc"
     assert row.last_active_at > 0
+    touched_at = row.last_active_at
 
     await store.upsert_session(channel, thread_ts, permission_mode="plan", touch=False)
     row = await store.get_session(channel, thread_ts)
     assert row.permission_mode == "plan"
     # sdk_session_id must survive an update that doesn't touch it.
     assert row.sdk_session_id == "sdk-abc"
+    # touch=False must PRESERVE the existing timestamp, not stamp a new one.
+    assert row.last_active_at == touched_at
 
 
 async def assert_partner_roundtrip(store) -> None:

@@ -24,16 +24,9 @@ class StubStore:
         *,
         sdk_session_id=None,
         permission_mode=None,
-        engaged=None,
         touch=True,
     ):
         return None
-
-    async def set_engaged(self, channel, thread_ts, value):
-        return None
-
-    async def is_engaged(self, channel, thread_ts):
-        return False
 
     async def set_partner(self, channel, thread_ts, user_id):
         return None

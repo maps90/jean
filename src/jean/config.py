@@ -66,7 +66,7 @@ class Settings(BaseSettings):
     # Postgres retention cleanup, swept daily by whichever worker claims the cycle.
     # Sessions and approvals expire on separate schedules: a thread's memory going
     # stale is not the same event as an audit record aging out. Deleting a session
-    # row also drops its transcript (FK cascade) -- and its engaged/permission_mode,
+    # row also drops its transcript (FK cascade) -- and its engaged_with/permission_mode,
     # so a thread quiet this long needs a fresh mention to re-engage jean.
     cleanup_enabled: bool = True
     session_retention_days: int = 3

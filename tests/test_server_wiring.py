@@ -67,12 +67,6 @@ class FakeStore:
     async def upsert_session(self, channel, thread_ts, **kwargs):
         return None
 
-    async def set_engaged(self, channel, thread_ts, value):
-        return None
-
-    async def is_engaged(self, channel, thread_ts):
-        return False
-
     async def bump_turn(self, channel, thread_ts):
         return 1
 

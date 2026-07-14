@@ -47,7 +47,6 @@ class MemoryStore:
             thread_ts=row.thread_ts,
             sdk_session_id=row.sdk_session_id,
             permission_mode=row.permission_mode,
-            engaged=row.engaged,
             last_active_at=row.last_active_at,
             turn_seq=row.turn_seq,
             engaged_with=row.engaged_with,
@@ -60,7 +59,6 @@ class MemoryStore:
         *,
         sdk_session_id: str | None = None,
         permission_mode: str | None = None,
-        engaged: bool | None = None,
         touch: bool = True,
     ) -> None:
         key = (channel, thread_ts)
@@ -74,7 +72,6 @@ class MemoryStore:
             permission_mode=permission_mode
             if permission_mode is not None
             else (existing.permission_mode if existing else None),
-            engaged=engaged if engaged is not None else (existing.engaged if existing else False),
             last_active_at=(
                 time.time() if touch else (existing.last_active_at if existing else 0.0)
             ),
@@ -82,13 +79,6 @@ class MemoryStore:
             engaged_with=existing.engaged_with if existing else None,
         )
         self._sessions[key] = row
-
-    async def set_engaged(self, channel: str, thread_ts: str, value: bool) -> None:
-        await self.upsert_session(channel, thread_ts, engaged=value, touch=False)
-
-    async def is_engaged(self, channel: str, thread_ts: str) -> bool:
-        row = self._sessions.get((channel, thread_ts))
-        return bool(row and row.engaged)
 
     async def set_partner(self, channel: str, thread_ts: str, user_id: str | None) -> None:
         # Not routed through upsert_session: `None` there means "leave unchanged",

@@ -15,7 +15,7 @@ from tests.store_behavior import (
     assert_prune_removes_resolved_approvals_and_stale_sessions,
     assert_prune_uses_separate_windows_and_drops_transcripts,
     assert_save_requires_an_existing_session,
-    assert_session_roundtrip_and_engagement,
+    assert_session_roundtrip,
     assert_thread_lock_allows_different_threads,
     assert_thread_lock_serializes_same_thread,
     assert_transcript_roundtrip,
@@ -29,8 +29,8 @@ def store():
     return MemoryStore()
 
 
-async def test_session_roundtrip_and_engagement(store):
-    await assert_session_roundtrip_and_engagement(store)
+async def test_session_roundtrip(store):
+    await assert_session_roundtrip(store)
 
 
 async def test_partner_roundtrip(store):

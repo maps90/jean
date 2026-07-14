@@ -12,7 +12,6 @@ _SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (
   channel text NOT NULL, thread_ts text NOT NULL,
   sdk_session_id text, permission_mode text,
-  engaged boolean NOT NULL DEFAULT false,
   last_active_at double precision NOT NULL DEFAULT 0,
   PRIMARY KEY (channel, thread_ts));
 CREATE TABLE IF NOT EXISTS approvals (
@@ -39,6 +38,7 @@ CREATE TABLE IF NOT EXISTS transcripts (
   FOREIGN KEY (channel, thread_ts) REFERENCES sessions(channel, thread_ts) ON DELETE CASCADE);
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS turn_seq bigint NOT NULL DEFAULT 0;
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS engaged_with text;
+ALTER TABLE sessions DROP COLUMN IF EXISTS engaged;
 ALTER TABLE transcripts ALTER COLUMN data SET STORAGE EXTERNAL;
 """
 
@@ -87,7 +87,6 @@ class PostgresStore:
                 thread_ts=r["thread_ts"],
                 sdk_session_id=r["sdk_session_id"],
                 permission_mode=r["permission_mode"],
-                engaged=r["engaged"],
                 last_active_at=r["last_active_at"],
                 turn_seq=r["turn_seq"],
                 engaged_with=r["engaged_with"],
@@ -101,35 +100,23 @@ class PostgresStore:
         *,
         sdk_session_id: str | None = None,
         permission_mode: str | None = None,
-        engaged: bool | None = None,
         touch: bool = True,
     ) -> None:
         # COALESCE keeps existing values when a field is not being changed.
         await self._pool.execute(
-            """INSERT INTO sessions(channel,thread_ts,sdk_session_id,permission_mode,engaged,last_active_at)
-               VALUES($1,$2,$3,$4,COALESCE($5,false),
-                      CASE WHEN $6 THEN extract(epoch from now()) ELSE 0 END)
+            """INSERT INTO sessions(channel,thread_ts,sdk_session_id,permission_mode,last_active_at)
+               VALUES($1,$2,$3,$4,
+                      CASE WHEN $5 THEN extract(epoch from now()) ELSE 0 END)
                ON CONFLICT(channel,thread_ts) DO UPDATE SET
                  sdk_session_id=COALESCE($3, sessions.sdk_session_id),
                  permission_mode=COALESCE($4, sessions.permission_mode),
-                 engaged=COALESCE($5, sessions.engaged),
-                 last_active_at=CASE WHEN $6 THEN extract(epoch from now()) ELSE sessions.last_active_at END""",
+                 last_active_at=CASE WHEN $5 THEN extract(epoch from now()) ELSE sessions.last_active_at END""",
             channel,
             thread_ts,
             sdk_session_id,
             permission_mode,
-            engaged,
             touch,
         )
-
-    async def set_engaged(self, channel: str, thread_ts: str, value: bool) -> None:
-        await self.upsert_session(channel, thread_ts, engaged=value, touch=False)
-
-    async def is_engaged(self, channel: str, thread_ts: str) -> bool:
-        v = await self._pool.fetchval(
-            "SELECT engaged FROM sessions WHERE channel=$1 AND thread_ts=$2", channel, thread_ts
-        )
-        return bool(v)
 
     async def set_partner(self, channel: str, thread_ts: str, user_id: str | None) -> None:
         # A plain assignment, not COALESCE: $3 = NULL must clear the partner, not
@@ -202,7 +189,7 @@ class PostgresStore:
     # ---- ThreadLock ----  advisory *xact* lock auto-releases on tx end.
     # This is held for the ENTIRE agent turn (per-thread serialization across
     # workers), so it must NOT be drawn from the shared query pool -- doing so
-    # would starve short queries (upsert_session/is_engaged/...) and, worse,
+    # would starve short queries (upsert_session/get_partner/...) and, worse,
     # ApprovalCoordinator.wait()'s own pool.acquire() once enough threads are
     # mid-turn (a pool-exhaustion deadlock). Use a dedicated connection instead.
     def __call__(self, channel: str, thread_ts: str):

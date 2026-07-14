@@ -12,10 +12,9 @@ import time
 import pytest
 
 
-async def assert_session_roundtrip_and_engagement(store) -> None:
+async def assert_session_roundtrip(store) -> None:
     channel, thread_ts = "C1", "111.222"
     assert await store.get_session(channel, thread_ts) is None
-    assert await store.is_engaged(channel, thread_ts) is False
 
     await store.upsert_session(channel, thread_ts, sdk_session_id="sdk-abc")
     row = await store.get_session(channel, thread_ts)
@@ -23,21 +22,13 @@ async def assert_session_roundtrip_and_engagement(store) -> None:
     assert row.channel == channel
     assert row.thread_ts == thread_ts
     assert row.sdk_session_id == "sdk-abc"
-    assert row.engaged is False
     assert row.last_active_at > 0
-
-    await store.set_engaged(channel, thread_ts, True)
-    assert await store.is_engaged(channel, thread_ts) is True
-    row = await store.get_session(channel, thread_ts)
-    assert row.engaged is True
-    # sdk_session_id must survive an update that doesn't touch it.
-    assert row.sdk_session_id == "sdk-abc"
 
     await store.upsert_session(channel, thread_ts, permission_mode="plan", touch=False)
     row = await store.get_session(channel, thread_ts)
     assert row.permission_mode == "plan"
+    # sdk_session_id must survive an update that doesn't touch it.
     assert row.sdk_session_id == "sdk-abc"
-    assert row.engaged is True
 
 
 async def assert_partner_roundtrip(store) -> None:

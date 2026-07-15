@@ -36,11 +36,12 @@ def summarize(tool_name: str, tool_input: dict[str, Any]) -> str:
     is always printed verbatim underneath it.
     """
     if tool_name == "ExitPlanMode":
-        # Under the default plan mode this is the ONE thing a human approves: the
-        # agent's own plan for the whole task, not a single rendered tool call.
-        # The key is confirmed against the CLI at runtime (agent_options logs the
-        # raw input on first sight); fall back to the tool args so a missing or
-        # renamed key never posts an empty, unreviewable approval.
+        # Plan mode is no longer the default; a thread opts in via /mode. When it
+        # does, this is the ONE thing a human approves: the agent's own plan for
+        # the whole task, not a single rendered tool call. The key is confirmed
+        # against the CLI at runtime (agent_options logs the raw input on first
+        # sight); fall back to the tool args so a missing or renamed key never
+        # posts an empty, unreviewable approval.
         plan = str(tool_input.get("plan") or "").strip()
         if plan:
             return _clip(plan)

@@ -35,6 +35,18 @@ def summarize(tool_name: str, tool_input: dict[str, Any]) -> str:
     words (Bash's `description`) are shown as context, but the command itself
     is always printed verbatim underneath it.
     """
+    if tool_name == "ExitPlanMode":
+        # Under the default plan mode this is the ONE thing a human approves: the
+        # agent's own plan for the whole task, not a single rendered tool call.
+        # The key is confirmed against the CLI at runtime (agent_options logs the
+        # raw input on first sight); fall back to the tool args so a missing or
+        # renamed key never posts an empty, unreviewable approval.
+        plan = str(tool_input.get("plan") or "").strip()
+        if plan:
+            return _clip(plan)
+        args = json.dumps(tool_input, indent=2, default=str, ensure_ascii=False)
+        return f"Approve this plan\n```{_clip(args)}```"
+
     if tool_name == "Bash":
         command = str(tool_input.get("command", ""))
         description = str(tool_input.get("description", "")).strip()

@@ -27,9 +27,12 @@ def test_defaults_resolve(clean_env):
     assert settings.slack_app_token == "xapp-test"
     assert settings.idle_minutes == 15
     assert settings.approval_ttl == 1800
-    # Not "bypassPermissions": that mode skips the CLI's permission system, so
-    # the can_use_tool hook -- jean's Slack Approve/Deny buttons -- never fires.
-    assert settings.permission_mode == "default"
+    # "plan" is the default: the agent researches read-only, presents ONE plan,
+    # a human approves it once (jean intercepts ExitPlanMode), then the approved
+    # turn runs unattended. Not "bypassPermissions", which skips the CLI's
+    # permission system so the can_use_tool hook never fires; not "default",
+    # which would gate every mutating tool call one click at a time.
+    assert settings.permission_mode == "plan"
     assert settings.health_port == 8080
     assert settings.soul_parse_model == "claude-haiku-4-5-20251001"
     assert settings.database_url == "postgresql://jean:jean@localhost:5432/jean"

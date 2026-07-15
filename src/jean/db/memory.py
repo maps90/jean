@@ -180,11 +180,11 @@ class MemoryStore:
             return decision
         return row.future.result()
 
-    async def resolve(self, approval_id: str, approved: bool, by: str) -> bool:
+    async def resolve(self, approval_id: str, approved: bool, by: str, scope: str = "once") -> bool:
         row = self._approvals.get(approval_id)
         if row is None or row.decision is not None or row.future.done():
             return False
-        decision = ApprovalDecision(approved, by)
+        decision = ApprovalDecision(approved, by, scope)
         row.decision = decision
         row.resolved_at = time.time()
         row.future.set_result(decision)

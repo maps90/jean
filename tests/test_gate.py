@@ -373,3 +373,56 @@ async def test_double_click_second_click_returns_gone():
         assert second == "gone"
 
     await asyncio.gather(gate.request("C1", "111.0", "deploy please"), click_twice())
+
+
+async def test_blocks_include_an_always_allow_button():
+    coordinator = MemoryStore()
+    posted: list[list[dict]] = []
+    approvers = [ApproverEntry(user_id="U1", scope="", catchall=True)]
+    gate = _make_gate(coordinator, posted, approvers=approvers, timeout_seconds=0.05)
+
+    await gate.request("C1", "111.0", "kubectl delete pod")
+
+    ids = _action_ids(posted[0])
+    assert any(a.startswith("jean_appr:always:") for a in ids)
+
+
+async def test_always_click_resolves_with_always_scope():
+    coordinator = MemoryStore()
+    posted: list[list[dict]] = []
+    posted_event = asyncio.Event()
+    approvers = [ApproverEntry(user_id="U1", scope="", catchall=True)]
+    gate = _make_gate(
+        coordinator, posted, approvers=approvers, timeout_seconds=5.0, posted_event=posted_event
+    )
+
+    waiter = asyncio.create_task(gate.request("C1", "111.0", "kubectl delete pod"))
+    await posted_event.wait()
+    always_id = _action_id_for(posted[0], "always")
+    result = await gate.handle_action(always_id, "U1")
+    decision = await waiter
+
+    assert result == "approved"
+    assert decision.approved is True
+    assert decision.scope == "always"
+
+
+async def test_always_click_by_a_non_approver_is_unauthorized():
+    coordinator = MemoryStore()
+    posted: list[list[dict]] = []
+    posted_event = asyncio.Event()
+    approvers = [ApproverEntry(user_id="U1", scope="", catchall=True)]
+    gate = _make_gate(
+        coordinator, posted, approvers=approvers, timeout_seconds=5.0, posted_event=posted_event
+    )
+
+    waiter = asyncio.create_task(gate.request("C1", "111.0", "kubectl delete pod"))
+    await posted_event.wait()
+    always_id = _action_id_for(posted[0], "always")
+    result = await gate.handle_action(always_id, "INTRUDER")
+
+    assert result == "unauthorized"
+    # Still pending -- resolve it so the waiter doesn't hang the test.
+    approve_id = _action_id_for(posted[0], "approve")
+    await gate.handle_action(approve_id, "U1")
+    await waiter

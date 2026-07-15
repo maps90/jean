@@ -58,8 +58,8 @@ async def test_the_approval_describes_the_actual_tool_call():
 
 
 async def test_the_request_goes_to_the_session_thread_not_to_shared_routing_state():
-    """The channel/thread are bound per session at build time. Reading the
-    process-wide RoutingContext here would misroute the approval whenever a
+    """The channel/thread are bound per session at build time. Reading a
+    process-wide routing slot here would misroute the approval whenever a
     second thread starts a turn while this one waits -- asking the wrong
     people, in the wrong thread, to approve a mutation."""
     gate = _gate(True)

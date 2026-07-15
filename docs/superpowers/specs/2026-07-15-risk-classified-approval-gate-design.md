@@ -205,3 +205,26 @@ shape for each verdict.
   `Always allow` for that pattern this session.
 - Every security decision is deterministic code; the LLM never classifies risk.
 - The gate is an exception handler, not a blocker on ordinary work.
+
+## Known limitations
+
+1. **"Always allow" is session-scoped, not durable.** The `addRules` permission
+   it writes lives on the in-process `ClaudeSDKClient`. A `turn_seq` mismatch
+   that forces a rehydrate, or a later turn on the same thread landing on a
+   different worker (a fresh `resume`d client, per the stateless-workers
+   model), does not carry that rule forward -- the gate re-asks. This fails
+   safe (it re-asks rather than silently allowing), but it means the "stops
+   asking" promise only holds for as long as one worker keeps the same client
+   cached. A durable per-thread allowlist (e.g. persisted in Postgres) is
+   future work.
+2. **The classifier protects the approver's attention, not against an
+   adversarial agent.** `classify_risk` pattern-matches the literal command or
+   tool id; it does not evaluate what the command does. Shell obfuscation --
+   piping a script to `sh`/`bash -c`, `eval`, base64-decode-then-run, or any
+   other indirection that hides the real action from the regex -- can land on
+   `SAFE` even though the underlying action would have been `RISKY` if
+   written plainly. This is an accepted limitation: the design's premise
+   (CLAUDE.md's trust boundary) is that jean's own agent is Claude, not an
+   adversary trying to evade the gate, so the classifier is scoped to keep a
+   cooperative agent's routine work from needlessly pulling in a human, not
+   to defeat deliberate evasion.

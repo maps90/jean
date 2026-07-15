@@ -29,12 +29,16 @@ _DENY_MCP = re.compile(r"^mcp__.+__(authenticate|complete_authentication)$")
 # --- Bash command patterns, per category. Matched case-insensitively against
 #     the *verbatim* command string. This table IS the security surface: adding
 #     a hole here silently widens what runs unattended. Review it as such. ---
+#     A force flag can be combined-short (-rf), separated (-r -f / -f -r), or
+#     long (--force, --recursive --force) -- match a force flag in any of
+#     those forms, in any order relative to other flags, without flagging a
+#     plain (non-force) rm or git clean.
+_FORCE_FLAG = r"(?:-[a-zA-Z]+\s+|--\w+\s+)*(?:-[a-zA-Z]*f[a-zA-Z]*\b|--force\b)"
 _DESTRUCTIVE = re.compile(
-    r"""
-    \brm\s+-[a-z]*f          # rm -rf / -fr
-    | \bgit\s+push\b.*(--force|-f)\b
+    rf"""
+    \brm\s+{_FORCE_FLAG}          # rm -rf / -r -f / -f -r / --force
     | \bgit\s+reset\s+--hard\b
-    | \bgit\s+clean\s+-[a-z]*f
+    | \bgit\s+clean\s+{_FORCE_FLAG}
     | \bkubectl\s+delete\b
     | \bdrop\s+(table|database|schema)\b
     | \btruncate\b
@@ -54,12 +58,16 @@ _SECRETS = re.compile(
     | \bkubectl\b.*\bsecret
     | \bcredentials?\b
     | \.ssh/
+    | \bprintenv\b
+    | \becho\b.*\$\{?\w*(?:KEY|TOKEN|SECRET|PASSWORD)\w*\b
     """,
     re.IGNORECASE | re.VERBOSE,
 )
 _EXTERNAL = re.compile(
     r"""
     \bcurl\b | \bwget\b
+    | \bscp\b
+    | \brsync\b.*(?:@[\w.-]+:|::)
     | \bgh\s+pr\s+create\b
     | \b(npm|pip|cargo|gem)\s+publish\b
     | \bgit\s+push\b
@@ -87,7 +95,7 @@ _SECRET_PATH = re.compile(
     r"(^|/)\.env(\.|$)|/\.ssh/|\bid_rsa\b|\.pem$|\.key$|/secrets?/|\bcredentials?\b",
     re.IGNORECASE,
 )
-_FILE_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit"}
+_FILE_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit", "Read"}
 
 # --- MCP tool ids whose verb is a mutation worth a human ---
 _MCP_RISK = re.compile(

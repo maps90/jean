@@ -105,3 +105,68 @@ def test_synthesized_oauth_tool_is_denied():
 def test_unknown_tool_defaults_to_safe():
     # The four categories are the agreed line; anything unmatched must not block.
     assert classify_risk("SomeNewTool", {"whatever": 1}) is Risk.SAFE
+
+
+def test_read_secret_file_is_risky():
+    assert classify_risk("Read", {"file_path": "/app/.env"}) is Risk.RISKY
+
+
+def test_read_workspace_file_is_safe():
+    path = "/home/jean/workspaces/app/main.py"
+    assert classify_risk("Read", {"file_path": path}) is Risk.SAFE
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "rm -r -f /data",
+        "rm -f -r /data",
+        "rm --force /data",
+        "rm --recursive --force /data",
+        "git clean -f",
+        "git clean -fd",
+        "git clean --force",
+    ],
+)
+def test_multi_flag_destructive_is_risky(command):
+    assert classify_risk("Bash", {"command": command}) is Risk.RISKY
+
+
+def test_plain_rm_without_force_stays_safe():
+    assert classify_risk("Bash", {"command": "rm file.txt"}) is Risk.SAFE
+
+
+def test_scp_is_risky():
+    command = "scp file user@remote:/path"
+    assert classify_risk("Bash", {"command": command}) is Risk.RISKY
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["rsync -av file user@host:/path", "rsync -av file host::module"],
+)
+def test_rsync_to_remote_is_risky(command):
+    assert classify_risk("Bash", {"command": command}) is Risk.RISKY
+
+
+def test_local_rsync_is_safe():
+    assert classify_risk("Bash", {"command": "rsync a b"}) is Risk.SAFE
+
+
+def test_printenv_is_risky():
+    assert classify_risk("Bash", {"command": "printenv"}) is Risk.RISKY
+
+
+def test_echo_secret_env_var_is_risky():
+    command = "echo $AWS_SECRET_KEY"
+    assert classify_risk("Bash", {"command": command}) is Risk.RISKY
+
+
+def test_env_prefix_command_stays_safe():
+    command = "env FOO=bar cmd"
+    assert classify_risk("Bash", {"command": command}) is Risk.SAFE
+
+
+def test_git_push_force_still_risky_after_dedup():
+    command = "git push --force origin main"
+    assert classify_risk("Bash", {"command": command}) is Risk.RISKY

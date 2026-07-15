@@ -61,8 +61,6 @@ def build_can_use_tool(gate: _Gate, *, channel: str, thread_ts: str) -> CanUseTo
     async def can_use_tool(
         tool_name: str, tool_input: dict[str, Any], context: Any
     ) -> PermissionResultAllow | PermissionResultDeny:
-        del context
-
         risk = classify_risk(tool_name, tool_input)
         if risk is Risk.SAFE:
             return PermissionResultAllow()
@@ -84,8 +82,16 @@ def build_can_use_tool(gate: _Gate, *, channel: str, thread_ts: str) -> CanUseTo
             logger.info(
                 "always-allowed: %s in %s/%s by %s", tool_name, channel, thread_ts, decision.by
             )
-            return PermissionResultAllow(
-                updated_permissions=[
+            # Prefer the CLI's own suggested narrow rule (e.g. `Bash(kubectl
+            # delete:*)`) when it offers one: a tool-wide rule would silence
+            # ALL future calls of this tool for the session, not just the
+            # approved pattern. Fall back to tool-wide only when the CLI gave
+            # no suggestion.
+            suggestions = getattr(context, "suggestions", None)
+            updated_permissions = (
+                suggestions
+                if suggestions
+                else [
                     PermissionUpdate(
                         type="addRules",
                         rules=[PermissionRuleValue(tool_name=tool_name, rule_content=None)],
@@ -94,6 +100,7 @@ def build_can_use_tool(gate: _Gate, *, channel: str, thread_ts: str) -> CanUseTo
                     )
                 ]
             )
+            return PermissionResultAllow(updated_permissions=updated_permissions)
         logger.info("approved: %s in %s/%s by %s", tool_name, channel, thread_ts, decision.by)
         return PermissionResultAllow()
 

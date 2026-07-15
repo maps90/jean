@@ -11,7 +11,7 @@ from jean.ports import ResolvedPlugin
 
 async def _allow(tool_name, tool_input, context):
     """Stands in for the Slack approval hook; build_can_use_tool is covered in
-    tests/test_tool_permission.py."""
+    tests/test_can_use_tool.py."""
     return PermissionResultAllow()
 
 

@@ -1,20 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 from jean.approval.gate import ApprovalGate
 from jean.db.memory import MemoryStore
 from jean.persona.model import ApproverEntry
 from jean.slack.mcp import build_slack_mcp
-
-
-@dataclass
-class _FakeRoutingContext:
-    """Stand-in for session.session.RoutingContext (Task 14): a mutable
-    channel/thread_ts the mcp tools read via channel_of()/thread_of()."""
-
-    channel: str = ""
-    thread_ts: str = ""
 
 
 class FakeChat:
@@ -86,29 +75,19 @@ def _make_gate(approved: bool):
     return gate
 
 
-def _routing_context(channel="C1", thread_ts="111.0"):
-    return _FakeRoutingContext(channel=channel, thread_ts=thread_ts)
-
-
 def test_tool_names_are_namespaced_for_allowed_tools():
     chat = FakeChat()
     gate = _make_gate(True)
-    ctx = _routing_context()
-    _server, tool_names, tools = build_slack_mcp(
-        chat, gate, channel_of=lambda: ctx.channel, thread_of=lambda: ctx.thread_ts
-    )
+    _server, tool_names, tools = build_slack_mcp(chat, gate, channel="C1", thread_ts="111.0")
     names = {t.name for t in tools}
     assert names == {"reply", "edit", "upload", "react", "unreact", "request_approval"}
     assert set(tool_names) == {f"mcp__jean_slack__{n}" for n in names}
 
 
-async def test_reply_tool_calls_chat_with_routed_channel_and_thread():
+async def test_reply_tool_calls_chat_with_bound_channel_and_thread():
     chat = FakeChat()
     gate = _make_gate(True)
-    ctx = _routing_context("C9", "222.0")
-    _server, _names, tools = build_slack_mcp(
-        chat, gate, channel_of=lambda: ctx.channel, thread_of=lambda: ctx.thread_ts
-    )
+    _server, _names, tools = build_slack_mcp(chat, gate, channel="C9", thread_ts="222.0")
     reply_tool = next(t for t in tools if t.name == "reply")
 
     result = await reply_tool.handler({"text": "hello there"})
@@ -121,10 +100,7 @@ async def test_reply_tool_calls_chat_with_routed_channel_and_thread():
 async def test_edit_tool():
     chat = FakeChat()
     gate = _make_gate(True)
-    ctx = _routing_context()
-    _server, _names, tools = build_slack_mcp(
-        chat, gate, channel_of=lambda: ctx.channel, thread_of=lambda: ctx.thread_ts
-    )
+    _server, _names, tools = build_slack_mcp(chat, gate, channel="C1", thread_ts="111.0")
     edit_tool = next(t for t in tools if t.name == "edit")
     await edit_tool.handler({"ts": "111.5", "text": "updated"})
     assert chat.edits == [("C1", "111.5", "updated")]
@@ -133,10 +109,7 @@ async def test_edit_tool():
 async def test_upload_tool():
     chat = FakeChat()
     gate = _make_gate(True)
-    ctx = _routing_context()
-    _server, _names, tools = build_slack_mcp(
-        chat, gate, channel_of=lambda: ctx.channel, thread_of=lambda: ctx.thread_ts
-    )
+    _server, _names, tools = build_slack_mcp(chat, gate, channel="C1", thread_ts="111.0")
     upload_tool = next(t for t in tools if t.name == "upload")
     await upload_tool.handler({"filename": "x.txt", "content": "hi"})
     assert chat.uploads[0]["filename"] == "x.txt"
@@ -147,10 +120,7 @@ async def test_upload_tool():
 async def test_react_and_unreact_tools():
     chat = FakeChat()
     gate = _make_gate(True)
-    ctx = _routing_context()
-    _server, _names, tools = build_slack_mcp(
-        chat, gate, channel_of=lambda: ctx.channel, thread_of=lambda: ctx.thread_ts
-    )
+    _server, _names, tools = build_slack_mcp(chat, gate, channel="C1", thread_ts="111.0")
     react_tool = next(t for t in tools if t.name == "react")
     unreact_tool = next(t for t in tools if t.name == "unreact")
     await react_tool.handler({"ts": "111.9", "emoji": "eyes"})
@@ -162,10 +132,7 @@ async def test_react_and_unreact_tools():
 async def test_request_approval_tool_approved():
     chat = FakeChat()
     gate = _make_gate(True)
-    ctx = _routing_context()
-    _server, _names, tools = build_slack_mcp(
-        chat, gate, channel_of=lambda: ctx.channel, thread_of=lambda: ctx.thread_ts
-    )
+    _server, _names, tools = build_slack_mcp(chat, gate, channel="C1", thread_ts="111.0")
     request_approval_tool = next(t for t in tools if t.name == "request_approval")
     result = await request_approval_tool.handler({"summary": "deploy the thing"})
     text = result["content"][0]["text"]
@@ -176,10 +143,31 @@ async def test_request_approval_tool_approved():
 async def test_request_approval_tool_denied():
     chat = FakeChat()
     gate = _make_gate(False)
-    ctx = _routing_context()
-    _server, _names, tools = build_slack_mcp(
-        chat, gate, channel_of=lambda: ctx.channel, thread_of=lambda: ctx.thread_ts
-    )
+    _server, _names, tools = build_slack_mcp(chat, gate, channel="C1", thread_ts="111.0")
     request_approval_tool = next(t for t in tools if t.name == "request_approval")
     result = await request_approval_tool.handler({"summary": "delete prod"})
     assert "denied" in result["content"][0]["text"]
+
+
+async def test_two_sessions_reply_to_their_own_thread_no_shared_routing():
+    """Each session builds its OWN Slack MCP server bound to that thread. There
+    is no process-wide routing slot for a concurrently-running turn on another
+    thread to repoint, so a slow turn on thread A always replies in A even after
+    thread B has started -- the "message jumps to another thread" bug.
+
+    Reproduces the race: build A, build B, then let A's reply fire *after* B was
+    built and used. With shared routing, A's reply would land in B's thread."""
+    chat = FakeChat()
+    gate = _make_gate(True)
+
+    _sa, _na, tools_a = build_slack_mcp(chat, gate, channel="C-A", thread_ts="111.0")
+    _sb, _nb, tools_b = build_slack_mcp(chat, gate, channel="C-B", thread_ts="222.0")
+
+    reply_a = next(t for t in tools_a if t.name == "reply")
+    reply_b = next(t for t in tools_b if t.name == "reply")
+
+    # B starts a turn and replies, then A (the slow turn) finally replies.
+    await reply_b.handler({"text": "for B"})
+    await reply_a.handler({"text": "for A"})
+
+    assert chat.replies == [("C-B", "222.0", "for B"), ("C-A", "111.0", "for A")]

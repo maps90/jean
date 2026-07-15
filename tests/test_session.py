@@ -11,7 +11,7 @@ from claude_agent_sdk import AssistantMessage as RealAssistantMessage
 from claude_agent_sdk import ProcessError
 
 from jean.db.memory import MemoryStore
-from jean.session.session import ASSISTANT_MESSAGE_CLASS_NAME, JeanSession, RoutingContext
+from jean.session.session import ASSISTANT_MESSAGE_CLASS_NAME, JeanSession
 from jean.session.transcript import LocalTranscripts
 
 # JeanSession takes its cap from Settings.transcript_max_mb (server.py wires it in),
@@ -128,7 +128,6 @@ async def test_run_turn_persists_session_id_and_sets_status(tmp_path: Path):
     FakeSdkClient.instances.clear()
     store = MemoryStore()
     chat = FakeChat()
-    routing = RoutingContext()
     factory, calls = _client_factory()
 
     session = JeanSession(
@@ -136,7 +135,6 @@ async def test_run_turn_persists_session_id_and_sets_status(tmp_path: Path):
         "111.0",
         store=store,
         chat=chat,
-        routing=routing,
         options_factory=lambda resume, mode=None: {"resume": resume, "mode": mode},
         client_factory=factory,
         transcripts=store,
@@ -149,8 +147,6 @@ async def test_run_turn_persists_session_id_and_sets_status(tmp_path: Path):
     row = await store.get_session("C1", "111.0")
     assert row.sdk_session_id == "sdk-session-abc"
     assert calls[0]["options"]["resume"] is None  # first turn: nothing to resume
-    assert routing.channel == "C1"
-    assert routing.thread_ts == "111.0"
     assert ("C1", "111.0", "is thinking...") in chat.statuses
 
 
@@ -158,7 +154,6 @@ async def test_run_turn_reuses_the_connected_client_across_turns(tmp_path: Path)
     FakeSdkClient.instances.clear()
     store = MemoryStore()
     chat = FakeChat()
-    routing = RoutingContext()
     factory, calls = _client_factory()
 
     session = JeanSession(
@@ -166,7 +161,6 @@ async def test_run_turn_reuses_the_connected_client_across_turns(tmp_path: Path)
         "111.0",
         store=store,
         chat=chat,
-        routing=routing,
         options_factory=lambda resume, mode=None: {"resume": resume, "mode": mode},
         client_factory=factory,
         transcripts=store,
@@ -190,14 +184,12 @@ async def test_second_turn_on_a_fresh_session_resumes_stored_id(tmp_path: Path):
     chat = FakeChat()
     local = LocalTranscripts(cli_home=tmp_path, cwd=Path("/w"))
 
-    routing1 = RoutingContext()
     factory1, calls1 = _client_factory()
     session1 = JeanSession(
         "C1",
         "111.0",
         store=store,
         chat=chat,
-        routing=routing1,
         options_factory=lambda resume, mode=None: {"resume": resume, "mode": mode},
         client_factory=factory1,
         transcripts=store,
@@ -207,14 +199,12 @@ async def test_second_turn_on_a_fresh_session_resumes_stored_id(tmp_path: Path):
     await session1.run_turn("hello")
     assert calls1[0]["options"]["resume"] is None
 
-    routing2 = RoutingContext()
     factory2, calls2 = _client_factory()
     session2 = JeanSession(
         "C1",
         "111.0",
         store=store,
         chat=chat,
-        routing=routing2,
         options_factory=lambda resume, mode=None: {"resume": resume, "mode": mode},
         client_factory=factory2,
         transcripts=store,
@@ -232,7 +222,6 @@ async def test_failed_turn_resets_client_to_none_and_next_turn_rebuilds(tmp_path
     FakeSdkClient.instances.clear()
     store = MemoryStore()
     chat = FakeChat()
-    routing = RoutingContext()
 
     class ExplodingClient(FakeSdkClient):
         async def query(self, text: str) -> None:
@@ -250,7 +239,6 @@ async def test_failed_turn_resets_client_to_none_and_next_turn_rebuilds(tmp_path
         "111.0",
         store=store,
         chat=chat,
-        routing=routing,
         options_factory=lambda resume, mode=None: {"resume": resume, "mode": mode},
         client_factory=factory,
         transcripts=store,
@@ -286,7 +274,6 @@ async def test_close_disconnects_the_client(tmp_path: Path):
     FakeSdkClient.instances.clear()
     store = MemoryStore()
     chat = FakeChat()
-    routing = RoutingContext()
     factory, _calls = _client_factory()
 
     session = JeanSession(
@@ -294,7 +281,6 @@ async def test_close_disconnects_the_client(tmp_path: Path):
         "111.0",
         store=store,
         chat=chat,
-        routing=routing,
         options_factory=lambda resume, mode=None: {"resume": resume, "mode": mode},
         client_factory=factory,
         transcripts=store,
@@ -316,7 +302,6 @@ async def test_stale_resume_falls_back_to_a_fresh_session(tmp_path: Path):
     FakeSdkClient.instances.clear()
     store = MemoryStore()
     chat = FakeChat()
-    routing = RoutingContext()
     await store.upsert_session("C1", "111.0", sdk_session_id="gone-with-the-pod")
 
     calls: list[dict] = []
@@ -338,7 +323,6 @@ async def test_stale_resume_falls_back_to_a_fresh_session(tmp_path: Path):
         "111.0",
         store=store,
         chat=chat,
-        routing=routing,
         options_factory=lambda resume, mode=None: {"resume": resume, "mode": mode},
         client_factory=factory,
         transcripts=store,
@@ -366,7 +350,6 @@ async def test_connect_failure_unrelated_to_resume_propagates(tmp_path: Path):
     FakeSdkClient.instances.clear()
     store = MemoryStore()
     chat = FakeChat()
-    routing = RoutingContext()
     await store.upsert_session("C1", "111.0", sdk_session_id="perfectly-good-id")
 
     calls: list[dict] = []
@@ -384,7 +367,6 @@ async def test_connect_failure_unrelated_to_resume_propagates(tmp_path: Path):
         "111.0",
         store=store,
         chat=chat,
-        routing=routing,
         options_factory=lambda resume, mode=None: {"resume": resume, "mode": mode},
         client_factory=factory,
         transcripts=store,
@@ -414,7 +396,6 @@ def _session(store, chat, factory, local, **kw):
         "111.0",
         store=store,
         chat=chat,
-        routing=RoutingContext(),
         options_factory=lambda resume, mode=None: {"resume": resume, "mode": mode},
         client_factory=factory,
         transcripts=store,
@@ -512,7 +493,6 @@ async def test_local_transcript_is_kept_when_archiving_fails(tmp_path: Path):
         "111.0",
         store=store,
         chat=chat,
-        routing=RoutingContext(),
         options_factory=lambda resume, mode=None: {"resume": resume, "mode": mode},
         client_factory=factory,
         transcripts=BrokenTranscripts(),

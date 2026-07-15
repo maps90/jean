@@ -29,7 +29,7 @@ from jean.plugins.mcp_config import remote_servers, stdio_servers, take_over_plu
 from jean.plugins.mcp_proxy import build_proxy_servers
 from jean.ports import ChatSurface, MaintenanceStore, SessionStore, TranscriptStore
 from jean.session.manager import SessionManager
-from jean.session.session import JeanSession, RoutingContext
+from jean.session.session import JeanSession
 from jean.session.transcript import LocalTranscripts
 from jean.slack.client import SlackSurface
 from jean.slack.mcp import build_slack_mcp
@@ -68,7 +68,6 @@ def build_session_factory(
     settings: Settings,
     store: _Store,
     chat: ChatSurface,
-    routing: RoutingContext,
     options_factory_for: Callable[[str, str], OptionsFactory],
     client_factory: Callable[..., Any],
     local_transcripts: LocalTranscripts,
@@ -88,7 +87,6 @@ def build_session_factory(
             thread_ts,
             store=store,
             chat=chat,
-            routing=routing,
             options_factory=options_factory_for(channel, thread_ts),
             client_factory=client_factory,
             transcripts=store,
@@ -166,11 +164,6 @@ async def run() -> None:
             settings.identity_path,
         )
 
-    routing = RoutingContext()
-    server_mcp, tool_names, _tools = build_slack_mcp(
-        chat, gate, channel_of=lambda: routing.channel, thread_of=lambda: routing.thread_ts
-    )
-
     extra_mcp = load_mcp_config(settings.mcp_config_path)
     resolver = GitMarketplaceResolver(
         token=settings.marketplace_token, cache_dir=settings.marketplace_cache_dir
@@ -215,19 +208,26 @@ async def run() -> None:
     mcp_servers = {**build_proxy_servers(mcp_clients), **remote}
 
     def options_factory_for(channel: str, thread_ts: str) -> OptionsFactory:
-        # Bound per session: the permission hook waits on a human for up to
-        # approval_ttl, and the RoutingContext the MCP tools read is process-wide
-        # -- another thread starting a turn during that wait would repoint it and
-        # send this approval to the wrong thread. The channel/thread are known
-        # here, so close over them instead.
+        # Everything the MCP tools and the permission hook need to know which
+        # Slack thread they act in is bound HERE, per session -- never read from
+        # a process-wide slot at call time. Both the reply tools and the approval
+        # hook fire lazily, long after the turn began (the hook can wait on a
+        # human for up to approval_ttl); a shared routing slot would let another
+        # thread's turn repoint it in between, sending this thread's reply -- or
+        # its approval request -- into the wrong thread. The channel/thread are
+        # known here, so close over them. A per-session Slack server is cheap:
+        # in-process closures, not a child process.
         can_use_tool = build_can_use_tool(gate, channel=channel, thread_ts=thread_ts)
+        slack_server, slack_tool_names, _tools = build_slack_mcp(
+            chat, gate, channel=channel, thread_ts=thread_ts
+        )
 
         def options_factory(resume: str | None, permission_mode: str | None) -> ClaudeAgentOptions:
             return build_agent_options(
                 persona_text=persona_text,
                 agent_name=soul_provider().identity.name,
-                slack_server=server_mcp,
-                slack_tool_names=tool_names,
+                slack_server=slack_server,
+                slack_tool_names=slack_tool_names,
                 mcp_servers=mcp_servers,
                 plugins=plugins,
                 settings=settings,
@@ -243,7 +243,6 @@ async def run() -> None:
         settings=settings,
         store=store,
         chat=chat,
-        routing=routing,
         options_factory_for=options_factory_for,
         client_factory=ClaudeSDKClient,
         local_transcripts=local_transcripts,

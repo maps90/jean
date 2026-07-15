@@ -51,10 +51,12 @@ def build_can_use_tool(gate: _Gate, *, channel: str, thread_ts: str) -> CanUseTo
     `bypassPermissions` the CLI skips its permission system entirely and this
     is never called, which is why that is no longer the default (config.py).
 
-    channel/thread_ts are bound per session rather than read from the shared
-    RoutingContext: this awaits a human for up to `approval_ttl`, and any turn
+    channel/thread_ts are bound per session rather than read from a process-wide
+    slot at call time: this awaits a human for up to `approval_ttl`, and any turn
     starting on another thread meanwhile would repoint that shared state --
     posting this approval into the wrong thread, in front of the wrong people.
+    The per-session `jean_slack` MCP server (slack/mcp.py) is bound the same way,
+    for the same reason.
     """
 
     async def can_use_tool(

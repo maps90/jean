@@ -16,7 +16,7 @@ from jean.agent_options import build_agent_options
 from jean.config import Settings
 from jean.maintenance.cleanup import CleanupScheduler
 from jean.ports import PruneResult
-from jean.session.session import JeanSession, RoutingContext
+from jean.session.session import JeanSession
 
 
 def _make_settings(tmp_path: Path, **overrides: object) -> Settings:
@@ -144,7 +144,6 @@ def test_build_session_factory_wires_transcript_store_and_local(tmp_path):
         settings=settings,
         store=store,
         chat=FakeChat(),
-        routing=RoutingContext(),
         options_factory_for=options_factory_for,
         client_factory=lambda **kwargs: None,
         local_transcripts=local,

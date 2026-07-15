@@ -71,8 +71,7 @@ _EXTERNAL = re.compile(
     | \bgh\s+pr\s+create\b
     | \b(npm|pip|cargo|gem)\s+publish\b
     | \bgit\s+push\b
-    | \bmail\b | \bsendmail\b
-    | https?://
+    | \bsendmail\b | \bmailx\b
     """,
     re.IGNORECASE | re.VERBOSE,
 )
@@ -88,18 +87,38 @@ _PROD_INFRA = re.compile(
     """,
     re.IGNORECASE | re.VERBOSE,
 )
-_BASH_RISK = (_DESTRUCTIVE, _SECRETS, _EXTERNAL, _PROD_INFRA)
+# --- privilege escalation: running as another (usually root) user ---
+_PRIVESC = re.compile(r"\bsudo\b|\bdoas\b", re.IGNORECASE)
+_BASH_RISK = (_DESTRUCTIVE, _SECRETS, _EXTERNAL, _PROD_INFRA, _PRIVESC)
 
-# --- file paths that mean secrets, for Write/Edit ---
+# --- file paths that mean secrets or other sensitive persistence/exec
+#     vectors, for Write/Edit ---
 _SECRET_PATH = re.compile(
-    r"(^|/)\.env(\.|$)|/\.ssh/|\bid_rsa\b|\.pem$|\.key$|/secrets?/|\bcredentials?\b",
-    re.IGNORECASE,
+    r"""
+    (^|/)\.env(\.|$)
+    | /\.ssh/
+    | \bid_rsa\b
+    | \.pem$ | \.key$
+    | /secrets?/
+    | \bcredentials?\b
+    | (^|/)etc/
+    | \.bashrc\b | \.bash_profile\b | \.zshrc\b | \.profile\b
+    | /\.kube/config\b
+    | /\.git/hooks/
+    | \bauthorized_keys\b
+    """,
+    re.IGNORECASE | re.VERBOSE,
 )
 _FILE_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit", "Read"}
 
-# --- MCP tool ids whose verb is a mutation worth a human ---
+# --- native tools that reach outside the box: always external/outbound ---
+_WEB_TOOLS = {"WebFetch", "WebSearch"}
+
+# --- MCP tool ids whose verb is a mutation worth a human. `(?<!un)cordon`
+#     matches `cordon`/`nodes_cordon` but not `uncordon`/`nodes_uncordon`. ---
 _MCP_RISK = re.compile(
-    r"(delete|apply|rollout|scale|restart|drain|cordon|destroy|create|patch)",
+    r"(delete|apply|rollout|scale|restart|drain|(?<!un)cordon|destroy|create|patch"
+    r"|evict|replace|remove|terminate)",
     re.IGNORECASE,
 )
 
@@ -118,6 +137,10 @@ def classify_risk(tool_name: str, tool_input: dict[str, Any]) -> Risk:
     if tool_name in _FILE_TOOLS:
         path = str(tool_input.get("file_path") or tool_input.get("notebook_path") or "")
         return Risk.RISKY if _SECRET_PATH.search(path) else Risk.SAFE
+
+    if tool_name in _WEB_TOOLS:
+        # Native web tools always reach outside the box -- external/outbound.
+        return Risk.RISKY
 
     if tool_name.startswith("mcp__"):
         # Only jean's own Slack tools are in allowed_tools and skip can_use_tool.

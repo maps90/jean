@@ -170,3 +170,86 @@ def test_env_prefix_command_stays_safe():
 def test_git_push_force_still_risky_after_dedup():
     command = "git push --force origin main"
     assert classify_risk("Bash", {"command": command}) is Risk.RISKY
+
+
+# --- Fix 2: privilege escalation ---
+@pytest.mark.parametrize(
+    "command",
+    ["sudo useradd hacker", "sudo cat /etc/shadow", "doas ls"],
+)
+def test_privilege_escalation_bash_is_risky(command):
+    assert classify_risk("Bash", {"command": command}) is Risk.RISKY
+
+
+# --- Fix 3: native web tools are external/outbound ---
+def test_web_fetch_is_risky():
+    assert classify_risk("WebFetch", {"url": "https://example.com"}) is Risk.RISKY
+
+
+def test_web_search_is_risky():
+    assert classify_risk("WebSearch", {"query": "anything"}) is Risk.RISKY
+
+
+# --- Fix 5: MCP mutation-verb gaps + uncordon false positive ---
+def test_mcp_evict_tool_is_risky():
+    assert classify_risk("mcp__x__nodes_evict", {}) is Risk.RISKY
+
+
+def test_mcp_uncordon_tool_is_safe():
+    assert classify_risk("mcp__x__nodes_uncordon", {}) is Risk.SAFE
+
+
+@pytest.mark.parametrize(
+    "tool_name",
+    [
+        "mcp__x__nodes_replace",
+        "mcp__x__pods_remove",
+        "mcp__x__instances_terminate",
+    ],
+)
+def test_mcp_additional_mutation_verbs_are_risky(tool_name):
+    assert classify_risk(tool_name, {}) is Risk.RISKY
+
+
+# --- Fix 6: fewer Bash false positives on routine work ---
+def test_git_clone_https_is_safe():
+    command = "git clone https://github.com/x/y"
+    assert classify_risk("Bash", {"command": command}) is Risk.SAFE
+
+
+def test_grep_for_https_is_safe():
+    command = "grep https:// file.txt"
+    assert classify_risk("Bash", {"command": command}) is Risk.SAFE
+
+
+def test_ls_var_mail_is_safe():
+    assert classify_risk("Bash", {"command": "ls /var/mail/"}) is Risk.SAFE
+
+
+def test_curl_stays_risky():
+    assert classify_risk("Bash", {"command": "curl https://x"}) is Risk.RISKY
+
+
+def test_scp_still_risky_after_narrowing():
+    assert classify_risk("Bash", {"command": "scp f u@h:/p"}) is Risk.RISKY
+
+
+# --- Fix 7: sensitive non-secret write paths ---
+@pytest.mark.parametrize("path", ["/etc/passwd", "~/.bashrc", "~/.git/hooks/pre-commit"])
+def test_sensitive_non_secret_paths_are_risky(path):
+    assert classify_risk("Write", {"file_path": path}) is Risk.RISKY
+    assert classify_risk("Edit", {"file_path": path}) is Risk.RISKY
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["~/.zshrc", "~/.kube/config", "~/.ssh/authorized_keys"],
+)
+def test_more_sensitive_non_secret_paths_are_risky(path):
+    assert classify_risk("Write", {"file_path": path}) is Risk.RISKY
+
+
+def test_normal_workspace_file_stays_safe_after_broadening():
+    path = "/home/jean/workspaces/app/main.py"
+    assert classify_risk("Write", {"file_path": path}) is Risk.SAFE
+    assert classify_risk("Edit", {"file_path": path}) is Risk.SAFE

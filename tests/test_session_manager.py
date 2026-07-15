@@ -6,7 +6,7 @@ from pathlib import Path
 
 from jean.db.memory import MemoryStore
 from jean.session.manager import SessionManager
-from jean.session.session import JeanSession, RoutingContext
+from jean.session.session import JeanSession
 from jean.session.transcript import LocalTranscripts
 from tests.test_session import MAX_TRANSCRIPT_BYTES, FakeChat, FakeSdkClient
 
@@ -149,7 +149,6 @@ async def test_sweep_does_not_delete_the_transcript_a_new_turn_is_running_on(tmp
             thread_ts,
             store=store,
             chat=chat,
-            routing=RoutingContext(),
             options_factory=lambda resume, mode=None: {"resume": resume, "mode": mode},
             client_factory=lambda *, options: SlowTeardownClient(options=options),
             transcripts=store,
@@ -227,7 +226,6 @@ async def test_sweep_never_closes_a_session_whose_turn_is_in_flight(tmp_path: Pa
         "111.0",
         store=store,
         chat=chat,
-        routing=RoutingContext(),
         options_factory=lambda resume, mode=None: {"resume": resume, "mode": mode},
         client_factory=lambda *, options: ApprovalParkedClient(options=options),
         transcripts=store,

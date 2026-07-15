@@ -5,7 +5,6 @@ import contextlib
 import logging
 import math
 from collections.abc import Callable
-from dataclasses import dataclass
 from typing import Any
 
 from jean.ports import ChatSurface, SessionRow, SessionStore, TranscriptStore
@@ -25,16 +24,6 @@ logger = logging.getLogger(__name__)
 # same failure: if a turn streams zero matches despite otherwise succeeding, it falls
 # back to a conservative quiet-only wait instead of trusting target == baseline.
 ASSISTANT_MESSAGE_CLASS_NAME = "AssistantMessage"
-
-
-@dataclass
-class RoutingContext:
-    """Mutable per-turn routing the in-process MCP tools read via
-    channel_of()/thread_of() closures (see slack/mcp.py) -- the SDK agent has
-    no other way to know which Slack thread it is replying in."""
-
-    channel: str = ""
-    thread_ts: str = ""
 
 
 class JeanSession:
@@ -63,7 +52,6 @@ class JeanSession:
         *,
         store: SessionStore,
         chat: ChatSurface,
-        routing: RoutingContext,
         options_factory: Callable[[str | None, str | None], Any],
         client_factory: Callable[..., Any],
         transcripts: TranscriptStore,
@@ -79,7 +67,6 @@ class JeanSession:
         self._thread_ts = thread_ts
         self._store = store
         self._chat = chat
-        self._routing = routing
         self._options_factory = options_factory
         self._client_factory = client_factory
         self._transcripts = transcripts
@@ -349,8 +336,6 @@ class JeanSession:
             )
 
     async def run_turn(self, text: str) -> None:
-        self._routing.channel = self._channel
-        self._routing.thread_ts = self._thread_ts
         self._busy = True
         await self._chat.set_status(self._channel, self._thread_ts, "is thinking...")
         try:

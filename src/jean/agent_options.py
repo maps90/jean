@@ -10,11 +10,12 @@ from claude_agent_sdk import (
     PermissionResultDeny,
     PermissionUpdate,
 )
+from claude_agent_sdk.types import PermissionRuleValue
 
 from jean.approval.policy import deny_reason, summarize
+from jean.approval.risk import DENY_MESSAGE, Risk, classify_risk
 from jean.config import Settings
 from jean.persona.identity import DEFAULT_AGENT_NAME, compose_system_prompt
-from jean.plugins.mcp_proxy import proxy_tool_patterns
 from jean.ports import ApprovalDecision, ResolvedPlugin
 
 logger = logging.getLogger(__name__)
@@ -40,72 +41,68 @@ class _Gate(Protocol):
 
 
 def build_can_use_tool(gate: _Gate, *, channel: str, thread_ts: str) -> CanUseTool:
-    """The SDK's permission hook, answered by a human clicking a Slack button.
+    """The SDK's permission hook. A deterministic classifier decides risk; only
+    RISKY calls reach a human.
 
-    The CLI calls this for every tool it will not auto-allow -- i.e. everything
-    outside `allowed_tools` (jean's own Slack tools and the MCP servers) and
-    outside its read-only set. So Bash, Write and Edit reach here and block
-    until an approver decides; a `kubectl get` through the kubernetes MCP
-    server does not.
+    Runs under `default` permission_mode, so the CLI calls this for every tool
+    outside `allowed_tools` (jean's own Slack tools only) and outside its
+    read-only set -- i.e. Bash/Write/Edit and ALL plugin-MCP calls, including
+    read-only ones, which `classify_risk` auto-allows silently here.
 
-    Only reachable when `permission_mode` is a mode that *asks*: under
-    `bypassPermissions` the CLI skips its permission system entirely and this
-    is never called, which is why that is no longer the default (config.py).
+    - SAFE  -> allow silently. Routine work never blocks.
+    - DENY  -> refuse in code; never prompt a human.
+    - RISKY -> ask an approver. "Always allow" adds a session-scoped rule so a
+      repeated pattern stops asking.
 
-    channel/thread_ts are bound per session rather than read from a process-wide
-    slot at call time: this awaits a human for up to `approval_ttl`, and any turn
-    starting on another thread meanwhile would repoint that shared state --
-    posting this approval into the wrong thread, in front of the wrong people.
-    The per-session `jean_slack` MCP server (slack/mcp.py) is bound the same way,
-    for the same reason.
+    channel/thread_ts are bound per session (not read from a process-wide slot)
+    because this awaits a human and a turn on another thread must not repoint it.
     """
-
-    seen_exit_plan = False  # log the raw ExitPlanMode input once, to confirm its shape
 
     async def can_use_tool(
         tool_name: str, tool_input: dict[str, Any], context: Any
     ) -> PermissionResultAllow | PermissionResultDeny:
-        nonlocal seen_exit_plan
-        del context
+        risk = classify_risk(tool_name, tool_input)
+        if risk is Risk.SAFE:
+            return PermissionResultAllow()
+        if risk is Risk.DENY:
+            logger.info("hard-denied: %s in %s/%s", tool_name, channel, thread_ts)
+            return PermissionResultDeny(message=DENY_MESSAGE, interrupt=False)
 
-        # Under the default plan mode the CLI keeps the agent read-only until it
-        # presents its plan via ExitPlanMode -- so THIS is the single approval:
-        # the human reads the whole plan and clicks once. Approving it must both
-        # let the agent leave plan mode AND stop prompting for the rest of the
-        # turn, so the approved steps run unattended (what the human just agreed
-        # to). We do that by flipping the session to bypassPermissions here;
-        # JeanSession re-arms `plan` before the next turn, so the approval binds
-        # to this one plan and the next request is planned and approved afresh.
-        if tool_name == "ExitPlanMode":
-            if not seen_exit_plan:
-                # The exact input key is not documented; confirm it against the
-                # real CLI once, so a rename shows up in the logs instead of
-                # silently degrading to the JSON fallback in summarize().
-                logger.info("ExitPlanMode input keys: %s", sorted(tool_input))
-                seen_exit_plan = True
-            decision = await gate.request(channel, thread_ts, summarize(tool_name, tool_input))
-            if decision.approved:
-                logger.info("plan approved in %s/%s by %s", channel, thread_ts, decision.by)
-                return PermissionResultAllow(
-                    updated_permissions=[
-                        PermissionUpdate(
-                            type="setMode", mode="bypassPermissions", destination="session"
-                        )
-                    ]
-                )
-            logger.info("plan denied in %s/%s by %s", channel, thread_ts, decision.by)
-            # interrupt=False: stays in plan mode so the agent can report the
-            # denial; a later attempt re-plans rather than the thread dying.
+        # RISKY -> a human decides.
+        decision: ApprovalDecision = await gate.request(
+            channel, thread_ts, summarize(tool_name, tool_input)
+        )
+        if not decision.approved:
+            logger.info("denied: %s in %s/%s by %s", tool_name, channel, thread_ts, decision.by)
+            # interrupt=False: the tool does not run, but the turn lives, so the
+            # agent can tell the thread it was denied instead of dying silently.
             return PermissionResultDeny(message=deny_reason(decision), interrupt=False)
 
-        decision = await gate.request(channel, thread_ts, summarize(tool_name, tool_input))
-        if decision.approved:
-            logger.info("approved: %s in %s/%s by %s", tool_name, channel, thread_ts, decision.by)
-            return PermissionResultAllow()
-        logger.info("denied: %s in %s/%s by %s", tool_name, channel, thread_ts, decision.by)
-        # interrupt=False: the tool does not run, but the turn lives, so the
-        # agent can tell the thread it was denied instead of dying silently.
-        return PermissionResultDeny(message=deny_reason(decision), interrupt=False)
+        if decision.scope == "always":
+            logger.info(
+                "always-allowed: %s in %s/%s by %s", tool_name, channel, thread_ts, decision.by
+            )
+            # Prefer the CLI's own suggested narrow rule (e.g. `Bash(kubectl
+            # delete:*)`) when it offers one: a tool-wide rule would silence
+            # ALL future calls of this tool for the session, not just the
+            # approved pattern. Fall back to tool-wide only when the CLI gave
+            # no suggestion.
+            suggestions = getattr(context, "suggestions", None)
+            updated_permissions = (
+                suggestions
+                if suggestions
+                else [
+                    PermissionUpdate(
+                        type="addRules",
+                        rules=[PermissionRuleValue(tool_name=tool_name, rule_content=None)],
+                        behavior="allow",
+                        destination="session",
+                    )
+                ]
+            )
+            return PermissionResultAllow(updated_permissions=updated_permissions)
+        logger.info("approved: %s in %s/%s by %s", tool_name, channel, thread_ts, decision.by)
+        return PermissionResultAllow()
 
     return can_use_tool
 
@@ -126,11 +123,19 @@ def build_agent_options(
     """`mcp_servers` are jean's in-process proxies (plugins/mcp_proxy.py) plus any
     remote http servers -- never a stdio config. A stdio entry here would have the
     CLI fork its own copy of that server for every session, which is what the
-    proxy exists to prevent."""
+    proxy exists to prevent.
+
+    `allowed_tools` carries ONLY jean's own Slack surface tools. Plugin MCP tools
+    are deliberately left out: putting `mcp__<server>__*` wildcards here would
+    have the CLI auto-allow every proxied tool -- including mutations like
+    `mcp__plugin_kubectl_kubernetes__pods_delete` -- without ever calling
+    `can_use_tool`, bypassing the risk classifier entirely. Leaving them out
+    routes every plugin MCP call through `can_use_tool`, where `classify_risk`
+    decides."""
     return ClaudeAgentOptions(
         system_prompt=compose_system_prompt(persona_text, name=agent_name),
         mcp_servers={"jean_slack": slack_server, **mcp_servers},
-        allowed_tools=[*slack_tool_names, *proxy_tool_patterns(mcp_servers)],
+        allowed_tools=[*slack_tool_names],
         plugins=[{"type": "local", "path": p.path} for p in plugins],
         skills="all",
         strict_mcp_config=False,

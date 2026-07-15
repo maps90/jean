@@ -11,7 +11,7 @@ from jean.ports import ResolvedPlugin
 
 async def _allow(tool_name, tool_input, context):
     """Stands in for the Slack approval hook; build_can_use_tool is covered in
-    tests/test_tool_permission.py."""
+    tests/test_can_use_tool.py."""
     return PermissionResultAllow()
 
 
@@ -39,10 +39,11 @@ def test_merges_slack_and_proxied_mcp(monkeypatch):
     assert opts.strict_mcp_config is False
 
 
-def test_tools_are_allowed_by_server_not_by_a_bare_wildcard(monkeypatch):
-    """`mcp__*` is rejected by the CLI ("Wildcard tool name mcp__* is not
-    supported in allow rules") and the rule is dropped, which left every plugin
-    tool unreachable in production. The allow pattern must name its server."""
+def test_plugin_mcp_tools_are_not_blanket_allow_listed(monkeypatch):
+    """A blanket `mcp__<server>__*` allow rule for plugin MCP servers bypasses
+    `can_use_tool` entirely -- the classifier never sees mutations like
+    `mcp__plugin_kubectl_kubernetes__pods_delete`. Only jean's own Slack tools
+    are auto-allowed; plugin MCP calls must flow through the classifier."""
     opts = build_agent_options(
         persona_text="I am jean.",
         slack_server={"_": "slack"},
@@ -55,9 +56,10 @@ def test_tools_are_allowed_by_server_not_by_a_bare_wildcard(monkeypatch):
     )
 
     assert "mcp__*" not in opts.allowed_tools
-    assert "mcp__plugin_kubectl_kubernetes__*" in opts.allowed_tools
-    assert "mcp__grafana__*" in opts.allowed_tools
+    assert "mcp__plugin_kubectl_kubernetes__*" not in opts.allowed_tools
+    assert "mcp__grafana__*" not in opts.allowed_tools
     assert "mcp__jean_slack__reply" in opts.allowed_tools
+    assert not any(t.startswith("mcp__plugin") for t in opts.allowed_tools)
 
 
 def test_no_plugins_no_extra_mcp(monkeypatch):

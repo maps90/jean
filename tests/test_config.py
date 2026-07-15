@@ -27,12 +27,12 @@ def test_defaults_resolve(clean_env):
     assert settings.slack_app_token == "xapp-test"
     assert settings.idle_minutes == 15
     assert settings.approval_ttl == 1800
-    # "plan" is the default: the agent researches read-only, presents ONE plan,
-    # a human approves it once (jean intercepts ExitPlanMode), then the approved
-    # turn runs unattended. Not "bypassPermissions", which skips the CLI's
-    # permission system so the can_use_tool hook never fires; not "default",
-    # which would gate every mutating tool call one click at a time.
-    assert settings.permission_mode == "plan"
+    # "default" is the default: the CLI calls the permission hook for every
+    # mutating tool so classify_risk can decide -- routine mutations run
+    # unattended, the four risky categories ask a human. Not "bypassPermissions",
+    # which skips the CLI's permission system so the hook never fires; not
+    # "plan", which makes the agent present a plan first.
+    assert settings.permission_mode == "default"
     assert settings.health_port == 8080
     assert settings.soul_parse_model == "claude-haiku-4-5-20251001"
     assert settings.database_url == "postgresql://jean:jean@localhost:5432/jean"

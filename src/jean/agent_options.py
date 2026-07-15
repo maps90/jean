@@ -8,6 +8,7 @@ from claude_agent_sdk import (
     ClaudeAgentOptions,
     PermissionResultAllow,
     PermissionResultDeny,
+    PermissionUpdate,
 )
 
 from jean.approval.policy import deny_reason, summarize
@@ -59,10 +60,44 @@ def build_can_use_tool(gate: _Gate, *, channel: str, thread_ts: str) -> CanUseTo
     for the same reason.
     """
 
+    seen_exit_plan = False  # log the raw ExitPlanMode input once, to confirm its shape
+
     async def can_use_tool(
         tool_name: str, tool_input: dict[str, Any], context: Any
     ) -> PermissionResultAllow | PermissionResultDeny:
+        nonlocal seen_exit_plan
         del context
+
+        # Under the default plan mode the CLI keeps the agent read-only until it
+        # presents its plan via ExitPlanMode -- so THIS is the single approval:
+        # the human reads the whole plan and clicks once. Approving it must both
+        # let the agent leave plan mode AND stop prompting for the rest of the
+        # turn, so the approved steps run unattended (what the human just agreed
+        # to). We do that by flipping the session to bypassPermissions here;
+        # JeanSession re-arms `plan` before the next turn, so the approval binds
+        # to this one plan and the next request is planned and approved afresh.
+        if tool_name == "ExitPlanMode":
+            if not seen_exit_plan:
+                # The exact input key is not documented; confirm it against the
+                # real CLI once, so a rename shows up in the logs instead of
+                # silently degrading to the JSON fallback in summarize().
+                logger.info("ExitPlanMode input keys: %s", sorted(tool_input))
+                seen_exit_plan = True
+            decision = await gate.request(channel, thread_ts, summarize(tool_name, tool_input))
+            if decision.approved:
+                logger.info("plan approved in %s/%s by %s", channel, thread_ts, decision.by)
+                return PermissionResultAllow(
+                    updated_permissions=[
+                        PermissionUpdate(
+                            type="setMode", mode="bypassPermissions", destination="session"
+                        )
+                    ]
+                )
+            logger.info("plan denied in %s/%s by %s", channel, thread_ts, decision.by)
+            # interrupt=False: stays in plan mode so the agent can report the
+            # denial; a later attempt re-plans rather than the thread dying.
+            return PermissionResultDeny(message=deny_reason(decision), interrupt=False)
+
         decision = await gate.request(channel, thread_ts, summarize(tool_name, tool_input))
         if decision.approved:
             logger.info("approved: %s in %s/%s by %s", tool_name, channel, thread_ts, decision.by)

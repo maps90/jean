@@ -41,6 +41,27 @@ def test_a_file_write_never_dumps_the_file_body_into_the_approval():
     assert "AAAA" not in text
 
 
+def test_a_plan_approval_shows_the_plan_text():
+    # ExitPlanMode is the one approval jean asks for under the default plan mode:
+    # the human reads the plan itself, not a rendered tool call, before clicking.
+    text = summarize("ExitPlanMode", {"plan": "1. rollout restart api\n2. tail the logs"})
+    assert "rollout restart api" in text
+    assert "tail the logs" in text
+
+
+def test_a_huge_plan_is_clipped_so_slack_accepts_the_block():
+    text = summarize("ExitPlanMode", {"plan": "step\n" * 5_000})
+    assert len(text) < 3000
+    assert "…" in text
+
+
+def test_a_plan_with_no_text_still_summarizes():
+    # The exact input key is confirmed at runtime; a missing/renamed key must not
+    # produce an empty approval the human cannot reason about.
+    text = summarize("ExitPlanMode", {})
+    assert text.strip() != ""
+
+
 def test_denied_by_a_human_names_the_approver():
     reason = deny_reason(ApprovalDecision(approved=False, by="U123"))
     assert "U123" in reason

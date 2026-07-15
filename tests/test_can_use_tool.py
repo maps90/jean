@@ -12,9 +12,15 @@ class _RecordingGate:
     def __init__(self, decision: ApprovalDecision | None) -> None:
         self._decision = decision
         self.asked = False
+        self.channel: str | None = None
+        self.thread_ts: str | None = None
+        self.summary: str | None = None
 
     async def request(self, channel: str, thread_ts: str, summary: str) -> ApprovalDecision:
         self.asked = True
+        self.channel = channel
+        self.thread_ts = thread_ts
+        self.summary = summary
         assert self._decision is not None, "gate asked when it should not have been"
         return self._decision
 
@@ -63,3 +69,13 @@ async def test_risky_tool_denied_is_refused():
     result = await hook("Bash", {"command": "rm -rf /data"}, None)
     assert isinstance(result, PermissionResultDeny)
     assert result.interrupt is False
+
+
+async def test_risky_call_forwards_the_bound_channel_and_thread():
+    gate = _RecordingGate(ApprovalDecision(True, "U1", "once"))
+    hook = build_can_use_tool(gate, channel="C_BOUND", thread_ts="1111.2222")
+    result = await hook("Bash", {"command": "kubectl delete pod api-0"}, None)
+    assert isinstance(result, PermissionResultAllow)
+    assert gate.channel == "C_BOUND"
+    assert gate.thread_ts == "1111.2222"
+    assert gate.summary is not None and "kubectl delete pod api-0" in gate.summary

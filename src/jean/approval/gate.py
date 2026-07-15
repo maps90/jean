@@ -11,7 +11,7 @@ from jean.ports import ApprovalCoordinator, ApprovalDecision
 
 logger = logging.getLogger("jean.approval")
 
-ACTION_RE = re.compile(r"^jean_appr:(approve|deny):(.+)$")
+ACTION_RE = re.compile(r"^jean_appr:(approve|always|deny):(.+)$")
 
 # (channel, thread_ts, text, blocks) -> posted message ts. Kept as a plain
 # callable (not the concrete Slack client) so approval/ stays free of
@@ -116,10 +116,12 @@ class ApprovalGate:
         if user_id not in authorized:
             return "unauthorized"
 
-        resolved = await self._coordinator.resolve(approval_id, verb == "approve", user_id)
+        approved = verb != "deny"
+        scope = "always" if verb == "always" else "once"
+        resolved = await self._coordinator.resolve(approval_id, approved, user_id, scope)
         if not resolved:
             return "gone"
-        return "approved" if verb == "approve" else "denied"
+        return "approved" if approved else "denied"
 
 
 def _no_approver_blocks() -> list[dict]:
@@ -144,6 +146,9 @@ def _resolved_message(summary: str, decision: ApprovalDecision) -> tuple[str, li
     the sentinel "system" on a timeout -- not a Slack id, so never mention it."""
     if decision.by == "system":
         headline, footer = "Approval expired", "No answer in time -- treated as denied."
+    elif decision.approved and decision.scope == "always":
+        headline = "Always-allowed for this session"
+        footer = f"Always-allowed by <@{decision.by}>"
     elif decision.approved:
         headline, footer = "Approved", f"Approved by <@{decision.by}>"
     else:
@@ -177,6 +182,12 @@ def _build_blocks(approval_id: str, summary: str, approvers: set[str]) -> list[d
                     "text": {"type": "plain_text", "text": "Approve"},
                     "style": "primary",
                     "action_id": f"jean_appr:approve:{approval_id}",
+                    "value": approval_id,
+                },
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "Always allow"},
+                    "action_id": f"jean_appr:always:{approval_id}",
                     "value": approval_id,
                 },
                 {

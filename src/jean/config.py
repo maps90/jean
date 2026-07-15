@@ -44,14 +44,17 @@ class Settings(BaseSettings):
     # NoDecode: pydantic-settings would otherwise JSON-decode a tuple field, and
     # this one is written as a plain comma-separated list.
     approvers: Annotated[tuple[str, ...], NoDecode] = ()
-    # "default" is what makes approvals real: the CLI asks before every tool it
-    # does not auto-allow, and jean answers by posting Approve/Deny buttons and
-    # waiting on the click (agent_options.build_can_use_tool). Under
-    # "bypassPermissions" the CLI skips its permission system entirely, so the
-    # hook is never called and the only gate left is the agent *choosing* to
-    # call request_approval -- i.e. the persona could decide not to. A thread
-    # can still opt out for itself with `/mode bypassPermissions`.
-    permission_mode: str = "default"
+    # "plan" makes the approval a single, informed click: the CLI keeps the agent
+    # read-only until it presents a plan (the ExitPlanMode tool), jean posts THAT
+    # plan for one Approve/Deny, and on approval flips the turn to run its steps
+    # unattended (agent_options.build_can_use_tool switches to bypassPermissions;
+    # session.py re-arms plan for the next turn, so the approval binds to one plan).
+    # Alternatives, both reachable per-thread via `/mode`: "default" gates every
+    # mutating tool one click at a time; "bypassPermissions" skips the CLI's
+    # permission system entirely, so the hook never fires and the only gate left is
+    # the agent *choosing* to call request_approval -- i.e. the persona could
+    # decide not to.
+    permission_mode: str = "plan"
     health_port: int = 8080
     model: str | None = None
     soul_parse_model: str = "claude-haiku-4-5-20251001"

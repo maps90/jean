@@ -120,8 +120,9 @@ def classify_risk(tool_name: str, tool_input: dict[str, Any]) -> Risk:
         return Risk.RISKY if _SECRET_PATH.search(path) else Risk.SAFE
 
     if tool_name.startswith("mcp__"):
-        # jean's own Slack tools and read-only MCP calls never reach can_use_tool
-        # (they are in allowed_tools), so a mutation verb here is a real action.
+        # Only jean's own Slack tools are in allowed_tools and skip can_use_tool.
+        # Every plugin MCP call -- read-only and mutating alike -- reaches here,
+        # so a mutation verb in the tool id is what separates RISKY from SAFE.
         return Risk.RISKY if _MCP_RISK.search(tool_name) else Risk.SAFE
 
     return Risk.SAFE

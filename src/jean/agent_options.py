@@ -16,7 +16,6 @@ from jean.approval.policy import deny_reason, summarize
 from jean.approval.risk import DENY_MESSAGE, Risk, classify_risk
 from jean.config import Settings
 from jean.persona.identity import DEFAULT_AGENT_NAME, compose_system_prompt
-from jean.plugins.mcp_proxy import proxy_tool_patterns
 from jean.ports import ApprovalDecision, ResolvedPlugin
 
 logger = logging.getLogger(__name__)
@@ -46,8 +45,9 @@ def build_can_use_tool(gate: _Gate, *, channel: str, thread_ts: str) -> CanUseTo
     RISKY calls reach a human.
 
     Runs under `default` permission_mode, so the CLI calls this for every tool
-    outside `allowed_tools` (jean's Slack tools + the MCP proxies) and outside
-    its read-only set -- i.e. Bash/Write/Edit and mutating plugin-MCP calls.
+    outside `allowed_tools` (jean's own Slack tools only) and outside its
+    read-only set -- i.e. Bash/Write/Edit and ALL plugin-MCP calls, including
+    read-only ones, which `classify_risk` auto-allows silently here.
 
     - SAFE  -> allow silently. Routine work never blocks.
     - DENY  -> refuse in code; never prompt a human.
@@ -116,11 +116,19 @@ def build_agent_options(
     """`mcp_servers` are jean's in-process proxies (plugins/mcp_proxy.py) plus any
     remote http servers -- never a stdio config. A stdio entry here would have the
     CLI fork its own copy of that server for every session, which is what the
-    proxy exists to prevent."""
+    proxy exists to prevent.
+
+    `allowed_tools` carries ONLY jean's own Slack surface tools. Plugin MCP tools
+    are deliberately left out: putting `mcp__<server>__*` wildcards here would
+    have the CLI auto-allow every proxied tool -- including mutations like
+    `mcp__plugin_kubectl_kubernetes__pods_delete` -- without ever calling
+    `can_use_tool`, bypassing the risk classifier entirely. Leaving them out
+    routes every plugin MCP call through `can_use_tool`, where `classify_risk`
+    decides."""
     return ClaudeAgentOptions(
         system_prompt=compose_system_prompt(persona_text, name=agent_name),
         mcp_servers={"jean_slack": slack_server, **mcp_servers},
-        allowed_tools=[*slack_tool_names, *proxy_tool_patterns(mcp_servers)],
+        allowed_tools=[*slack_tool_names],
         plugins=[{"type": "local", "path": p.path} for p in plugins],
         skills="all",
         strict_mcp_config=False,

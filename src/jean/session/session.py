@@ -57,11 +57,6 @@ class JeanSession:
         transcripts: TranscriptStore,
         local: LocalTranscripts,
         max_transcript_bytes: int,  # no default: Settings.transcript_max_mb owns the number
-        # The deployment-wide permission_mode a thread falls back to when it set
-        # no `/mode` of its own. Needed to spot a plan-mode thread whose row holds
-        # None: the client still opened in plan (build_agent_options resolves the
-        # default), so re-arming after a plan approval keys off THIS, not the row.
-        default_permission_mode: str = "default",
         # The settle wait (see _settle). Defaults kept only so a test can build a
         # JeanSession without caring; production wires all three from Settings.
         settle_timeout: float = 10.0,
@@ -77,7 +72,6 @@ class JeanSession:
         self._transcripts = transcripts
         self._local = local
         self._max_transcript_bytes = max_transcript_bytes
-        self._default_permission_mode = default_permission_mode
         self._settle_timeout = settle_timeout
         self._settle_interval = settle_interval
         self._settle_quiet = settle_quiet
@@ -361,28 +355,8 @@ class JeanSession:
                 if mode_changed or stale:
                     with contextlib.suppress(Exception):
                         await self.close()
-            reused = self._client is not None
             if self._client is None:
                 self._client = await self._connect(row)
-
-            # A plan-mode thread approves ExitPlanMode once, which flips the SDK to
-            # bypassPermissions so the approved steps finish unattended -- leaving a
-            # cached client OUT of plan mode. Put it back before this turn runs, or
-            # this request would execute without a plan to approve. A fresh connect
-            # already opened in plan (options_factory), so only a reused client needs
-            # it; and only when the thread's effective mode is plan (its row may hold
-            # None and fall back to the deployment default). If the re-arm cannot be
-            # delivered, the client may still be in bypass -- drop it and reconnect
-            # rather than run the turn unattended (a fresh connect is plan by
-            # construction).
-            effective_mode = (row.permission_mode if row else None) or self._default_permission_mode
-            if reused and effective_mode == "plan":
-                try:
-                    await self._client.set_permission_mode("plan")
-                except Exception:
-                    with contextlib.suppress(Exception):
-                        await self.close()
-                    self._client = await self._connect(row)
 
             sid: str | None = None
             # Clear `_archived` HERE, not in _archive(): the flag means "the store's

@@ -1117,15 +1117,11 @@ async def test_changing_mode_mid_thread_rebuilds_the_client(tmp_path: Path):
     assert FakeSdkClient.instances[0].exited is True  # old client closed, not leaked
 
 
-async def test_a_cached_plan_client_is_rearmed_to_plan_each_turn(tmp_path: Path):
-    """Approving ExitPlanMode flips the SDK to bypassPermissions for the rest of
-    that turn, so a cached client is left OUT of plan mode. Before the next turn
-    runs, the session must put it back into plan mode -- otherwise that request
-    would execute unattended instead of producing a fresh plan to approve. The
-    approval is bound to one plan; re-arming is what keeps it that way.
-
-    A fresh connect already opens in `plan` (options_factory), so only a REUSED
-    client needs re-arming -- the first turn must not call set_permission_mode."""
+async def test_reused_client_is_not_re_armed_to_plan(tmp_path: Path):
+    """The classifier gates risky tool calls now (agent_options.classify_risk), so
+    the SDK's own permission mode never flips mid-turn the way plan-approval used
+    to -- there is nothing for a reused client to be put back into. A cached
+    client on a plan-mode thread must be left exactly as connected across turns."""
     FakeSdkClient.instances.clear()
     store, chat = MemoryStore(), FakeChat()
     local = LocalTranscripts(cli_home=tmp_path, cwd=Path("/w"))
@@ -1135,19 +1131,18 @@ async def test_a_cached_plan_client_is_rearmed_to_plan_each_turn(tmp_path: Path)
     session = _session(store, chat, factory, local)
     await session.run_turn("first request")
     client = FakeSdkClient.instances[0]
-    assert client.modes == []  # fresh connect: opened in plan, nothing to re-arm
+    assert client.modes == []  # fresh connect: opened in plan
 
     await session.run_turn("second request")
 
     assert len(calls) == 1  # same cached client reused (mode unchanged, seq current)
-    assert client.modes == ["plan"]  # re-armed before the second turn's query
-    # re-arm happens before the turn's work, not after
+    assert client.modes == []  # never re-armed
     assert client.queried == ["first request", "second request"]
 
 
 async def test_a_cached_non_plan_client_is_not_rearmed(tmp_path: Path):
-    """Re-arming is only for plan threads. A thread on `/mode default` (the old
-    per-action gate) or `bypassPermissions` must be left exactly as connected."""
+    """A thread on `/mode default` (the classifier-gated mode) or
+    `bypassPermissions` must be left exactly as connected across turns."""
     FakeSdkClient.instances.clear()
     store, chat = MemoryStore(), FakeChat()
     local = LocalTranscripts(cli_home=tmp_path, cwd=Path("/w"))

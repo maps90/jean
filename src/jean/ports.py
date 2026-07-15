@@ -20,6 +20,7 @@ class SessionRow:
 class ApprovalDecision:
     approved: bool
     by: str
+    scope: str = "once"  # "once" | "always"; meaningful only when approved
 
 
 @dataclass
@@ -81,7 +82,7 @@ class ApprovalCoordinator(Protocol):
     ) -> None: ...
     async def wait(self, approval_id: str, timeout: float) -> ApprovalDecision: ...
     async def resolve(
-        self, approval_id: str, approved: bool, by: str
+        self, approval_id: str, approved: bool, by: str, scope: str = "once"
     ) -> bool: ...  # True if it was pending
     async def set_approvers(self, approval_id: str, approvers: set[str]) -> None: ...
     async def approvers_of(self, approval_id: str) -> set[str]: ...

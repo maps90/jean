@@ -19,8 +19,10 @@ CREATE TABLE IF NOT EXISTS approvals (
   summary text NOT NULL, status text NOT NULL DEFAULT 'pending',
   approved boolean, approver_id text,
   approvers text[] NOT NULL DEFAULT '{}',
+  scope text NOT NULL DEFAULT 'once',
   requested_at double precision NOT NULL DEFAULT extract(epoch from now()),
   resolved_at double precision);
+ALTER TABLE approvals ADD COLUMN IF NOT EXISTS scope text NOT NULL DEFAULT 'once';
 CREATE TABLE IF NOT EXISTS maintenance (
   job text PRIMARY KEY, last_run double precision NOT NULL DEFAULT 0);
 -- A transcript cannot exist without its session: the FK below means
@@ -258,33 +260,38 @@ class PostgresStore:
 
             await conn.add_listener("jean_approvals", _cb)
             row = await conn.fetchrow(
-                "SELECT status,approved,approver_id FROM approvals WHERE id=$1", approval_id
+                "SELECT status,approved,approver_id,scope FROM approvals WHERE id=$1", approval_id
             )
             if row and row["status"] != "pending":
-                return ApprovalDecision(bool(row["approved"]), row["approver_id"] or "unknown")
+                return ApprovalDecision(
+                    bool(row["approved"]), row["approver_id"] or "unknown", row["scope"] or "once"
+                )
             try:
                 await asyncio.wait_for(fut, timeout)
             except TimeoutError:
                 await self.resolve(approval_id, False, "system")
             row = await conn.fetchrow(
-                "SELECT approved,approver_id FROM approvals WHERE id=$1", approval_id
+                "SELECT approved,approver_id,scope FROM approvals WHERE id=$1", approval_id
             )
             return ApprovalDecision(
                 bool(row["approved"]) if row else False,
                 (row["approver_id"] if row else None) or "system",
+                (row["scope"] if row else None) or "once",
             )
         finally:
             await conn.remove_listener("jean_approvals", _cb)
             await conn.close()
 
-    async def resolve(self, approval_id: str, approved: bool, by: str) -> bool:
+    async def resolve(self, approval_id: str, approved: bool, by: str, scope: str = "once") -> bool:
         status = await self._pool.fetchval(
-            "UPDATE approvals SET status=$2, approved=$3, approver_id=$4, resolved_at=extract(epoch from now()) "
+            "UPDATE approvals SET status=$2, approved=$3, approver_id=$4, scope=$5, "
+            "resolved_at=extract(epoch from now()) "
             "WHERE id=$1 AND status='pending' RETURNING id",
             approval_id,
             "approved" if approved else "denied",
             approved,
             by,
+            scope,
         )
         if status is None:
             return False

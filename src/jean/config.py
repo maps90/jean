@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import Annotated
 
@@ -34,6 +35,14 @@ class Settings(BaseSettings):
     # a server with headroom to spare.
     db_pool_min: int = 1
     db_pool_max: int = 5
+    # Postgres schema this instance's tables live in (via search_path). The
+    # default "public" is single-agent-per-database: exactly the old behavior.
+    # Set a distinct value per agent (e.g. "anya", "damian") to host MULTIPLE
+    # agents in ONE database -- each gets its own schema, and the per-thread
+    # lock / cleanup gate / approval NOTIFY channel are namespaced by it, so
+    # agents never read, write, or prune each other's rows. All sharing agents
+    # point JEAN_DATABASE_URL at the same DB and differ only by JEAN_DB_SCHEMA.
+    db_schema: str = "public"
     home: Path = Path.home() / ".jean"
     idle_minutes: int = 15
     approval_ttl: int = 1800
@@ -89,6 +98,19 @@ class Settings(BaseSettings):
     settle_timeout: float = 10.0
     settle_interval: float = 0.1
     settle_quiet: float = 1.0
+
+    @field_validator("db_schema")
+    @classmethod
+    def _valid_schema(cls, value: str) -> str:
+        """db_schema is interpolated into DDL (CREATE SCHEMA), the search_path,
+        the cleanup advisory-lock key, and the LISTEN/NOTIFY channel name -- none
+        of which can be a bound parameter. So it must be a plain lowercase SQL
+        identifier, validated at boot, never trusted from the environment."""
+        if not re.fullmatch(r"[a-z_][a-z0-9_]*", value):
+            raise ValueError(
+                f"JEAN_DB_SCHEMA must be a lowercase identifier [a-z_][a-z0-9_]*: {value!r}"
+            )
+        return value
 
     @field_validator("approvers", mode="before")
     @classmethod

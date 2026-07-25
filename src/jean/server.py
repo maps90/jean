@@ -121,6 +121,7 @@ async def run() -> None:
         settings.database_url,
         min_size=settings.db_pool_min,
         max_size=settings.db_pool_max,
+        schema=settings.db_schema,
     )
 
     persona_text = load_identity(settings.identity_path)

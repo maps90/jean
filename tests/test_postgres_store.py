@@ -4,6 +4,7 @@ import asyncio
 import os
 import uuid
 
+import asyncpg
 import pytest
 
 from jean.db.postgres import PostgresStore
@@ -191,3 +192,32 @@ async def test_locks_do_not_starve_pool_or_approval_wait(store):
     finally:
         release.set()
         await asyncio.gather(*lock_tasks)
+
+
+async def test_schemas_isolate_agents_in_one_database():
+    """The multi-agent guarantee: two agents on the SAME database but different
+    JEAN_DB_SCHEMA share no rows. The same (channel, thread_ts) key lands in each
+    schema independently, and one agent's prune -- however aggressive -- never
+    touches the other's data."""
+    dsn = os.environ["JEAN_TEST_DATABASE_URL"]
+    anya = await PostgresStore.connect(dsn, schema="anya_test")
+    damian = await PostgresStore.connect(dsn, schema="damian_test")
+    try:
+        ch, ts = f"C-{_uid()}", "1.0"
+        await anya.upsert_session(ch, ts, sdk_session_id="s-anya")
+        # Identical key, different schema: damian's schema has no such row.
+        assert await anya.get_session(ch, ts) is not None
+        assert await damian.get_session(ch, ts) is None
+        # damian pruning everything (a far-future cutoff matches every row) must
+        # leave anya's session untouched -- the fix for the global-prune data loss.
+        await damian.prune(sessions_older_than=1e18, approvals_older_than=1e18)
+        assert await anya.get_session(ch, ts) is not None
+    finally:
+        await anya.close()
+        await damian.close()
+        cleanup = await asyncpg.connect(dsn)
+        try:
+            await cleanup.execute('DROP SCHEMA IF EXISTS "anya_test" CASCADE')
+            await cleanup.execute('DROP SCHEMA IF EXISTS "damian_test" CASCADE')
+        finally:
+            await cleanup.close()

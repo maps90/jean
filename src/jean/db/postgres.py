@@ -64,19 +64,53 @@ class PostgresStore:
     serialization uses `pg_advisory_xact_lock`.
     """
 
-    def __init__(self, pool: asyncpg.Pool, dsn: str):
+    def __init__(self, pool: asyncpg.Pool, dsn: str, schema: str = "public"):
         self._pool = pool
         self._dsn = dsn
+        self._schema = schema
+        # Namespace the three database-global primitives (a NOTIFY channel and
+        # two advisory-lock keys are per-DATABASE, not per-schema) so agents
+        # sharing one database don't cross-signal. "public" keeps the historical
+        # bare names, so an existing single-agent deployment is byte-for-byte
+        # unchanged (no lock/NOTIFY rename mid-rollout).
+        suffix = "" if schema == "public" else f"_{schema}"
+        self._notify_channel = f"jean_approvals{suffix}"
+        self._cleanup_key = f"jean_cleanup{suffix}"
+        self._lock_prefix = "" if schema == "public" else f"{schema}:"
 
     @classmethod
-    async def connect(cls, dsn: str, *, min_size: int = 1, max_size: int = 5) -> PostgresStore:
+    async def connect(
+        cls, dsn: str, *, min_size: int = 1, max_size: int = 5, schema: str = "public"
+    ) -> PostgresStore:
         """Open the pool. Sizes come from Settings (`JEAN_DB_POOL_MIN/MAX`) so a
         deployment sharing a small managed Postgres can shrink its footprint
-        without a rebuild -- see the note on Settings.db_pool_max."""
-        pool = await asyncpg.create_pool(dsn, min_size=min_size, max_size=max_size)
+        without a rebuild -- see the note on Settings.db_pool_max.
+
+        `schema` (JEAN_DB_SCHEMA) puts this instance's tables in their own
+        Postgres schema via search_path, so N agents can share ONE database with
+        fully isolated rows and per-schema retention. server_settings applies the
+        search_path to every pooled connection at startup; the dedicated
+        lock/listen connections set it too (see _connect)."""
+        pool = await asyncpg.create_pool(
+            dsn,
+            min_size=min_size,
+            max_size=max_size,
+            server_settings={"search_path": schema},
+        )
         async with pool.acquire() as c:
+            # DDL can't be parameterized; `schema` is a validated lowercase
+            # identifier (Settings._valid_schema). Must precede _SCHEMA: with
+            # search_path pointing here, CREATE TABLE needs the schema to exist.
+            # "public" already exists, so IF NOT EXISTS is a no-op there.
+            await c.execute(f'CREATE SCHEMA IF NOT EXISTS "{schema}"')
             await c.execute(_SCHEMA)
-        return cls(pool, dsn)
+        return cls(pool, dsn, schema)
+
+    async def _connect(self) -> asyncpg.Connection:
+        """A dedicated (non-pooled) connection for the per-thread lock and the
+        approval LISTEN -- both must not draw from the shared pool. It carries
+        the same search_path so wait()'s approvals query hits this schema."""
+        return await asyncpg.connect(self._dsn, server_settings={"search_path": self._schema})
 
     async def ping(self) -> bool:
         async with self._pool.acquire() as c:
@@ -208,8 +242,8 @@ class PostgresStore:
 
     @asynccontextmanager
     async def _lock(self, channel: str, thread_ts: str):
-        key = f"{channel}:{thread_ts}"
-        conn = await asyncpg.connect(self._dsn)
+        key = f"{self._lock_prefix}{channel}:{thread_ts}"
+        conn = await self._connect()
         try:
             async with conn.transaction():
                 await conn.execute("SELECT pg_advisory_xact_lock(hashtext($1))", key)
@@ -251,14 +285,14 @@ class PostgresStore:
         # connection and short queries for the same limited pool.
         loop = asyncio.get_running_loop()
         fut: asyncio.Future = loop.create_future()
-        conn = await asyncpg.connect(self._dsn)
+        conn = await self._connect()
         try:
 
             def _cb(_c, _pid, _chan, payload):
                 if payload == approval_id and not fut.done():
                     fut.set_result(True)
 
-            await conn.add_listener("jean_approvals", _cb)
+            await conn.add_listener(self._notify_channel, _cb)
             row = await conn.fetchrow(
                 "SELECT status,approved,approver_id,scope FROM approvals WHERE id=$1", approval_id
             )
@@ -279,7 +313,7 @@ class PostgresStore:
                 (row["scope"] if row else None) or "once",
             )
         finally:
-            await conn.remove_listener("jean_approvals", _cb)
+            await conn.remove_listener(self._notify_channel, _cb)
             await conn.close()
 
     async def resolve(self, approval_id: str, approved: bool, by: str, scope: str = "once") -> bool:
@@ -295,7 +329,7 @@ class PostgresStore:
         )
         if status is None:
             return False
-        await self._pool.execute("SELECT pg_notify('jean_approvals', $1)", approval_id)
+        await self._pool.execute("SELECT pg_notify($1, $2)", self._notify_channel, approval_id)
         return True
 
     # ---- MaintenanceStore ----  retention cleanup, swept every cleanup_interval_hours
@@ -325,7 +359,9 @@ class PostgresStore:
         # and the durable maintenance.last_run row enforces the interval so a
         # restart doesn't re-run early. Lock auto-releases on commit.
         async with self._pool.acquire() as c, c.transaction():
-            got = await c.fetchval("SELECT pg_try_advisory_xact_lock(hashtext('jean_cleanup'))")
+            got = await c.fetchval(
+                "SELECT pg_try_advisory_xact_lock(hashtext($1))", self._cleanup_key
+            )
             if not got:
                 return False
             await c.execute("INSERT INTO maintenance(job) VALUES('cleanup') ON CONFLICT DO NOTHING")

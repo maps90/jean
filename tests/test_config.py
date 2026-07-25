@@ -140,3 +140,23 @@ def test_db_pool_size_overridable(clean_env):
     settings = Settings.load()
     assert settings.db_pool_min == 2
     assert settings.db_pool_max == 3
+
+
+def test_db_schema_defaults_to_public(clean_env):
+    # The default is single-agent-per-database: unchanged historical behavior.
+    assert Settings.load().db_schema == "public"
+
+
+def test_db_schema_override(clean_env):
+    # Per-agent schema is how N agents share one database (JEAN_DB_SCHEMA=anya).
+    clean_env.setenv("JEAN_DB_SCHEMA", "anya")
+    assert Settings.load().db_schema == "anya"
+
+
+@pytest.mark.parametrize("bad", ["Anya", "agent-anya", "1anya", "an ya", 'a";DROP', ""])
+def test_db_schema_rejects_non_identifier(clean_env, bad):
+    # db_schema is interpolated into DDL / search_path / NOTIFY channel names, so
+    # anything but a plain lowercase identifier must fail at boot, not inject.
+    clean_env.setenv("JEAN_DB_SCHEMA", bad)
+    with pytest.raises(ValueError):
+        Settings.load()

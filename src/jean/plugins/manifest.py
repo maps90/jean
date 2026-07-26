@@ -13,12 +13,17 @@ _SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._\-]*$")  # plugin: single path
 
 
 def _validate(ref: PluginRef) -> None:
-    for field, value, pattern in (
+    fields = [
         ("marketplace", ref.marketplace, _SAFE_URL),
         ("plugin", ref.plugin, _SAFE_NAME),
         ("ref", ref.ref, _SAFE_URL),
-    ):
-        if not pattern.match(value) or ".." in value:
+    ]
+    # A skill is named, never pathed: the name is matched against the ones the
+    # marketplace declares, so a separator here could only be an attempt to
+    # reach a directory the marketplace never offered.
+    fields += [("skill", s, _SAFE_NAME) for s in ref.skills or ()]
+    for field, value, pattern in fields:
+        if not isinstance(value, str) or not pattern.match(value) or ".." in value:
             raise ValueError(f"unsafe {field} in jean.json: {value!r}")
 
 
@@ -32,7 +37,13 @@ def load_plugin_manifest(path: Path) -> list[PluginRef]:
     refs: list[PluginRef] = []
     for e in entries:
         try:
-            pref = PluginRef(e["marketplace"], e["plugin"], e["ref"])
+            selected = e.get("skills")
+            pref = PluginRef(
+                e["marketplace"],
+                e["plugin"],
+                e["ref"],
+                skills=tuple(selected) if selected is not None else None,
+            )
         except (KeyError, TypeError) as exc:
             raise ValueError(f"invalid plugin entry {e!r}: {exc}") from exc
         _validate(pref)

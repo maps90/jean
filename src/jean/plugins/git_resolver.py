@@ -73,6 +73,27 @@ async def _default_git_run(args: list[str], cwd: Path) -> None:
         raise RuntimeError(f"git {args[0]} failed: {_scrub(err.decode(errors='replace'))}")
 
 
+def _select(declared: list[str], e: PluginRef) -> list[str]:
+    """The marketplace's skill paths, narrowed to the names jean.json asked for.
+
+    Matched on the last path segment, which is the skill's own name (the one in
+    its SKILL.md frontmatter and the one an operator would type). An
+    unrecognised name is fatal rather than ignored: a typo that silently loaded
+    three of four skills would surface much later as jean "not knowing how" to
+    make a spreadsheet, with nothing in the logs to connect it back.
+    """
+    if not e.skills:
+        return declared
+    by_name = {p.rstrip("/").rsplit("/", 1)[-1]: p for p in declared}
+    unknown = [s for s in e.skills if s not in by_name]
+    if unknown:
+        raise RuntimeError(
+            f"plugin '{e.plugin}' in {e.marketplace} has no skill(s) {', '.join(unknown)}; "
+            f"it offers: {', '.join(sorted(by_name))}"
+        )
+    return [by_name[s] for s in e.skills]
+
+
 class GitMarketplaceResolver:
     """Clones marketplace repos -- HTTPS (token auth) or SSH (ambient key),
     chosen by the marketplace URL scheme -- and returns local plugin paths for
@@ -160,15 +181,26 @@ class GitMarketplaceResolver:
         if not plugin_dir.is_dir():
             raise RuntimeError(f"plugin '{e.plugin}' not found in {e.marketplace}@{e.ref}")
         if (plugin_dir / MANIFEST).is_file():
+            if e.skills:
+                # Narrowing works by rebuilding the plugin dir from its skills.
+                # A plugin that ships its own manifest may also ship commands,
+                # agents and MCP servers, and the rebuild would drop every one
+                # of them -- an amputation nobody asked for. Refuse instead.
+                raise RuntimeError(
+                    f"plugin '{e.plugin}' ships its own plugin.json; a jean.json "
+                    "'skills' filter only applies to marketplaces that declare "
+                    "their skills inline"
+                )
             return plugin_dir
 
         skills = entry.get("skills") if entry else None
         if isinstance(skills, list) and skills:
+            declared = [s for s in skills if isinstance(s, str)]
             return build_overlay(
                 plugin=e.plugin,
                 description=entry.get("description") if entry else None,
                 source_dir=plugin_dir,
-                skills=[s for s in skills if isinstance(s, str)],
+                skills=_select(declared, e),
                 overlay_root=self._cache_dir / "overlays" / _clone_key(e.marketplace, e.ref),
             )
         # No manifest and nothing to overlay from: hand it over as-is and let

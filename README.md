@@ -155,10 +155,25 @@ loads. Each entry names a marketplace repo, a plugin inside it, and a git ref:
 {
   "plugins": [
     { "marketplace": "git@github.com:example-org/skills.git", "plugin": "kubectl", "ref": "main" },
-    { "marketplace": "https://github.com/anthropics/skills.git", "plugin": "document-skills", "ref": "main" }
+    {
+      "marketplace": "https://github.com/anthropics/skills.git",
+      "plugin": "document-skills",
+      "ref": "main",
+      "skills": ["docx", "xlsx", "pptx"]
+    }
   ]
 }
 ```
+
+The optional **`skills`** list narrows a plugin to the skills you actually want. Upstream
+decides what ships together -- `anthropics/skills` sells 12 skills under one
+`example-skills` name and bundles `pdf` in with `docx`/`xlsx`/`pptx` -- but every loaded
+skill costs always-on context in *every* session, so the deployment gets the last word.
+Omit it to take everything the marketplace lists. A name that the plugin doesn't offer is
+a boot error, not a silent omission: a typo that quietly loaded three of four skills would
+resurface much later as jean "not knowing how" to make a spreadsheet. The filter works by
+rebuilding the plugin dir, so it is refused on a plugin that ships its own `plugin.json`
+(that plugin may also carry commands, agents and MCP servers the rebuild would drop).
 
 jean clones each marketplace once per `(url, ref)` and reads its
 `.claude-plugin/marketplace.json` to find the plugin's directory -- it does not assume a

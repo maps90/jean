@@ -25,6 +25,60 @@ logger = logging.getLogger(__name__)
 # back to a conservative quiet-only wait instead of trusting target == baseline.
 ASSISTANT_MESSAGE_CLASS_NAME = "AssistantMessage"
 
+# The `jean_slack` tools that put something a human can READ into the thread. A turn
+# that called none of them said nothing, however much text it generated: jean's system
+# prompt tells the agent its plain output is invisible, and it is -- run_turn forwards
+# none of it. react/unreact are deliberately absent: an emoji acknowledges, it never
+# answers, and a turn whose only visible act was a reaction is exactly the silent
+# failure this guards. request_approval counts because it posts a Block Kit message.
+SPEAKING_TOOLS = frozenset(
+    {
+        "mcp__jean_slack__reply",
+        "mcp__jean_slack__edit",
+        "mcp__jean_slack__upload",
+        "mcp__jean_slack__request_approval",
+    }
+)
+
+# Said when a turn ends having neither spoken nor produced any text to fall back on.
+# Silence is the one outcome that must never reach the thread: it is indistinguishable
+# from jean being broken, which sends people debugging the gateway, the database and
+# Slack for something the model simply declined to say.
+MUTE_TURN_NOTICE = (
+    "I finished working on that but produced no reply -- nothing to show for it. "
+    "Worth asking again, and worth a look at my logs if it keeps happening."
+)
+
+
+def _blocks_of(msg: object) -> list:
+    """An AssistantMessage's content blocks, defensively.
+
+    Duck-typed for the same reason the class match is (CLAUDE.md's layering rule
+    keeps the SDK out of session/), and tolerant because this runs on the path that
+    delivers a human their answer: a shape jean does not recognise must degrade to
+    "found no text" rather than raise and lose the turn.
+    """
+    content = getattr(msg, "content", None)
+    return content if isinstance(content, list) else []
+
+
+def _called_a_speaking_tool(msg: object) -> bool:
+    return any(getattr(b, "name", None) in SPEAKING_TOOLS for b in _blocks_of(msg))
+
+
+def _text_of(msg: object) -> str | None:
+    """The message's text blocks joined, or None if it carried no usable text.
+
+    Whitespace-only is None: a blank final message is not an answer, and posting it
+    would look exactly like the silence it is meant to replace.
+    """
+    parts = [
+        t.strip()
+        for b in _blocks_of(msg)
+        if isinstance(t := getattr(b, "text", None), str) and t.strip()
+    ]
+    return "\n\n".join(parts) or None
+
 
 class JeanSession:
     """One Slack thread's persistent claude-agent session.
@@ -335,6 +389,46 @@ class JeanSession:
                 "failed to archive transcript for %s/%s", self._channel, self._thread_ts
             )
 
+    async def _speak_for_it(self, final_text: str | None) -> None:
+        """Post on behalf of a turn that finished without saying anything.
+
+        The agent's only route to the thread is a `jean_slack` tool call, and the
+        system prompt says so -- but a model can still end a turn having written its
+        answer as plain assistant text, which reaches jean and goes nowhere. Observed
+        for real at `JEAN_EFFORT=low`: a full Elasticsearch RCA, correct root cause,
+        `stop_reason: end_turn`, zero `jean_slack` calls. The turn looked like a
+        success from every angle jean records -- turn_seq bumped, no error -- while
+        the human saw only the acknowledging reaction.
+
+        So jean says it instead. Not best-effort: unlike a status or a reaction this
+        IS the answer, so a failure here is logged as an error rather than swallowed.
+        Warned either way, because a turn reaching this path means the model ignored
+        an explicit instruction and that is worth seeing in the logs.
+        """
+        if final_text:
+            logger.warning(
+                "turn on %s/%s ended without calling a jean_slack tool; posting its "
+                "final assistant text (%d chars) so the thread is not left silent",
+                self._channel,
+                self._thread_ts,
+                len(final_text),
+            )
+        else:
+            logger.warning(
+                "turn on %s/%s ended without calling a jean_slack tool and produced no "
+                "text to fall back on; posting a notice so the thread is not left silent",
+                self._channel,
+                self._thread_ts,
+            )
+        try:
+            await self._chat.reply(self._channel, self._thread_ts, final_text or MUTE_TURN_NOTICE)
+        except Exception:
+            logger.exception(
+                "could not post the fallback reply for %s/%s -- this turn is silent",
+                self._channel,
+                self._thread_ts,
+            )
+
     async def run_turn(self, text: str) -> None:
         self._busy = True
         await self._chat.set_status(self._channel, self._thread_ts, "is thinking...")
@@ -383,6 +477,8 @@ class JeanSession:
                 else 0
             )
             assistant_msgs = 0
+            spoke = False  # did this turn call a tool the human can read?
+            final_text: str | None = None
             await self._client.query(text)
             async for msg in self._client.receive_response():
                 # The SDK streams one AssistantMessage per `assistant` record the CLI
@@ -397,6 +493,14 @@ class JeanSession:
                 # runtime if it ever drifts.
                 if type(msg).__name__ == ASSISTANT_MESSAGE_CLASS_NAME:
                     assistant_msgs += 1
+                    spoke = spoke or _called_a_speaking_tool(msg)
+                    text = _text_of(msg)
+                    if text:
+                        # Keep only the latest: earlier text is the model narrating
+                        # between tool calls, and posting the running commentary would
+                        # dump its working thread on the user. The last message is the
+                        # answer.
+                        final_text = text
                 got = getattr(msg, "session_id", None)
                 if got:
                     sid = got
@@ -404,6 +508,16 @@ class JeanSession:
                     await self._store.upsert_session(
                         self._channel, self._thread_ts, sdk_session_id=sid
                     )
+
+            # Only when the stream was intelligible. Zero AssistantMessages means the
+            # structural class-name match found nothing (see ASSISTANT_MESSAGE_CLASS_NAME
+            # -- most likely an SDK rename), and in that state jean cannot see tool calls
+            # either: `spoke` would be False on every turn and this would append the
+            # notice to every real reply. Staying quiet is the safe read of "I could not
+            # tell"; `_settle`'s count_reliable warning already reports the same fault.
+            if assistant_msgs and not spoke:
+                await self._speak_for_it(final_text)
+
             if sid is not None:
                 # Bump BEFORE archiving. The order is load-bearing, not tidiness:
                 # these are two separate statements and a connection can drop

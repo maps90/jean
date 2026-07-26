@@ -85,8 +85,29 @@ RUN uv sync --no-dev
 # MUST stay after the last `uv sync`: sync makes the venv match the lockfile
 # exactly and would prune every one of these back out again. Adding another
 # sync below this line silently disarms the document skills.
+#
+# `python-docx` is NOT in any skill's documented dependency list and no skill
+# script imports it -- the docx skill prescribes the npm `docx` library, which is
+# installed above. It is here because the AGENT reaches for it anyway: asked to
+# write a .docx, the model's prior is python-docx, and it ran `pip install
+# python-docx Pillow` in production. That costs an approval click (pip install is
+# RISKY by design) and then evaporates, because a pip install lands in the pod
+# filesystem and dies with the pod -- so it re-installs and re-prompts on every
+# restart, forever. Cheaper to satisfy the instinct than to keep refusing it.
+#
+# `pypdf` and `pdf2image` are the `pdf` skill's own imports. That skill is narrowed
+# out of jean.json today (`skills: ["docx","xlsx","pptx"]`), so nothing needs them
+# yet -- they are here so that enabling it later is a one-line config change and
+# not a repeat of the python-docx loop. `pdfplumber` arrives transitively via
+# markitdown[pdf] and is already satisfied.
+#
+# Deliberately NOT here: reportlab, fpdf, PyMuPDF. Nothing generates a PDF
+# directly -- the skills convert through LibreOffice (`soffice --convert-to pdf`),
+# which is installed above. Adding a PDF writer would invite the agent to bypass
+# that path for worse-looking output.
 RUN uv pip install --python /app/.venv/bin/python --no-cache-dir \
-        openpyxl pandas 'markitdown[docx,pptx,xlsx,pdf]' Pillow defusedxml lxml
+        openpyxl pandas 'markitdown[docx,pptx,xlsx,pdf]' Pillow defusedxml lxml \
+        python-docx pypdf pdf2image
 
 ENV PATH="/app/.venv/bin:$PATH"
 

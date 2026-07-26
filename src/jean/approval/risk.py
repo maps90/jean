@@ -34,9 +34,39 @@ _DENY_MCP = re.compile(r"^mcp__.+__(authenticate|complete_authentication)$")
 #     those forms, in any order relative to other flags, without flagging a
 #     plain (non-force) rm or git clean.
 _FORCE_FLAG = r"(?:-[a-zA-Z]+\s+|--\w+\s+)*(?:-[a-zA-Z]*f[a-zA-Z]*\b|--force\b)"
+
+# --- rm: recursion, or a dangerous target -- NOT the force flag on its own ---
+#
+# `\brm\s+<force flag>` used to be the whole rule, so `rm -f slide-*.jpg` read as
+# destructive. That is a scratch-file cleanup the pptx skill's own workflow
+# PRESCRIBES ("The `rm` clears stale images from prior runs"), so jean gated a
+# command its own skill told the agent to run -- and "Always allow" could not
+# absorb it, because the surrounding compound command varied by one argument
+# between attempts (`tail -20` vs `tail -5`), which the CLI's narrow suggested
+# pattern does not match.
+#
+# What actually distinguishes danger is recursion and the target, not `-f`:
+# `rm -f one-file` removes what it names, while `rm -rf dir` removes a tree and
+# `rm -f /etc/resolv.conf` breaks the box. So both of those still ask, and the
+# force flag alone no longer does.
+_RECURSIVE_FLAG = r"(?:-[a-zA-Z]+\s+|--\w+\s+)*(?:-[a-zA-Z]*r[a-zA-Z]*\b|--recursive\b)"
+# An ABSOLUTE (or `~`) target is dangerous by default; the two scratch locations
+# are the exceptions. Enumerating dangerous directories was the first attempt and
+# it leaked -- `rm --force /data` slipped through a list of /etc, /usr, /var and
+# friends. Default-deny is the only version that holds: anything absolute asks
+# unless it is somewhere the agent is supposed to be scribbling.
+#
+#   /tmp/...        -- where the document skills stage their work
+#   .../workspaces/ -- jean's own per-thread scratch dir (settings.home/workspaces)
+#
+# A relative target (`slide-*.jpg`, `./build/x`) never matches: it can only reach
+# the agent's own working directory. Recursion is handled separately above and
+# overrides both exemptions, so `rm -rf /tmp/build` still asks.
+_RM_ABSOLUTE_TARGET = r"(?!\S*/workspaces/)(?:~|/(?!tmp\b))"
 _DESTRUCTIVE = re.compile(
     rf"""
-    \brm\s+{_FORCE_FLAG}          # rm -rf / -r -f / -f -r / --force
+    \brm\s+{_RECURSIVE_FLAG}      # rm -rf / -r -f / -f -r / --recursive: a whole tree
+    | \brm\s+(?:-\S+\s+|--\S+\s+)*{_RM_ABSOLUTE_TARGET}   # rm at an absolute path
     | \bgit\s+reset\s+--hard\b
     | \bgit\s+clean\s+{_FORCE_FLAG}
     | \bkubectl\s+delete\b

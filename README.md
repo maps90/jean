@@ -146,6 +146,64 @@ storm.
 > only servers whose token is scoped to what jean should be allowed to do -- the token is
 > the blast radius, because the approval gate is not in this path.
 
+### 6. Give jean skills: plugin marketplaces
+
+`jean.json` (at `$JEAN_HOME/jean.json`, or `JEAN_PLUGINS_PATH`) lists the plugins jean
+loads. Each entry names a marketplace repo, a plugin inside it, and a git ref:
+
+```json
+{
+  "plugins": [
+    { "marketplace": "git@github.com:example-org/skills.git", "plugin": "kubectl", "ref": "main" },
+    {
+      "marketplace": "https://github.com/anthropics/skills.git",
+      "plugin": "document-skills",
+      "ref": "main",
+      "skills": ["docx", "xlsx", "pptx"]
+    }
+  ]
+}
+```
+
+The optional **`skills`** list narrows a plugin to the skills you actually want. Upstream
+decides what ships together -- `anthropics/skills` sells 12 skills under one
+`example-skills` name and bundles `pdf` in with `docx`/`xlsx`/`pptx` -- but every loaded
+skill costs always-on context in *every* session, so the deployment gets the last word.
+Omit it to take everything the marketplace lists. A name that the plugin doesn't offer is
+a boot error, not a silent omission: a typo that quietly loaded three of four skills would
+resurface much later as jean "not knowing how" to make a spreadsheet. The filter works by
+rebuilding the plugin dir, so it is refused on a plugin that ships its own `plugin.json`
+(that plugin may also carry commands, agents and MCP servers the rebuild would drop).
+
+jean clones each marketplace once per `(url, ref)` and reads its
+`.claude-plugin/marketplace.json` to find the plugin's directory -- it does not assume a
+layout. Two shapes exist in the wild and both work:
+
+- **A dir per plugin** (`source: "./plugins/kubectl"`, each with its own
+  `.claude-plugin/plugin.json`) -- handed to the CLI as-is.
+- **Declared inline** (`source: "./"` for every plugin, no `plugin.json` anywhere, each
+  entry listing its own skill paths -- this is `anthropics/skills`). The CLI cannot load
+  that directly, so jean builds the dir it expects in the plugin cache: a generated
+  manifest plus a copy of exactly the skills that entry listed. Plugins sharing one
+  `source` get one overlay each.
+
+Transport follows the URL: `git@`/`ssh://` clones over SSH with the ambient key,
+`https://` uses `JEAN_MARKETPLACE_TOKEN`. If a token clone fails, jean retries once
+anonymously -- a token scoped to your own marketplace is rejected on a third-party public
+repo, and what clones anonymously is public by definition.
+
+> **`ref` is not refreshed.** A `(marketplace, ref)` clone is cached and reused on later
+> boots, so a moving `"main"` means two pods can be running different skills. Pin a tag or
+> commit SHA for deterministic rollouts.
+
+**The document skills need a toolchain, and it is in the image.** `docx`, `xlsx`, and
+`pptx` shell out to LibreOffice, pandoc, `pdftoppm`, python (`openpyxl`, `pandas`,
+`markitdown`, …) and node (`docx`, `pptxgenjs`, `sharp`, …). The `Dockerfile` installs all
+of it, deliberately: their `SKILL.md` files assume it is preinstalled, and installing at
+turn time both costs an approval click (`pip install` / `npm install` classify as RISKY)
+and lands in a filesystem that dies with the pod. Running jean outside this image without
+that toolchain leaves the skills loadable but unable to produce a file.
+
 ## Using jean in Slack
 
 - **Mention it** (`@jean ...`) in any channel it's in, or **DM it directly**

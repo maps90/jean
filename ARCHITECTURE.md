@@ -79,6 +79,9 @@ Slack (Socket Mode)  ── load-balances events across all connected workers �
 | `gateway/engagement.py` | Pure engagement decision (mention / disengage / DM / reply) |
 | `gateway/dispatch.py` | Inbound message → attachment envelope → session turn |
 | `gateway/app.py` | Gateway domain methods + the Slack event/action/command wiring |
+| `plugins/manifest.py` | Parse + sanity-check `jean.json` / `mcp.json` |
+| `plugins/git_resolver.py` | Clone the marketplaces in `jean.json`; find each plugin's dir from its manifest |
+| `plugins/overlay.py` | Build a loadable plugin dir for a marketplace that declares plugins inline |
 | `plugins/mcp_stdio.py` | Spawn / reap a stdio MCP server child |
 | `plugins/mcp_client.py` | One long-lived MCP server per worker: handshake, multiplexed calls, restart |
 | `plugins/mcp_proxy.py` | Re-expose those servers' tools in-process, under their original tool ids |

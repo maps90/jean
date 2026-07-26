@@ -34,6 +34,11 @@ class PluginRef:
     marketplace: str
     plugin: str
     ref: str
+    # Narrow a bundled plugin to these skill names. None = take whatever the
+    # marketplace lists. Upstream decides what ships together (anthropics/skills
+    # sells 12 skills under one `example-skills` name); a deployment decides what
+    # it actually wants in every session's context.
+    skills: tuple[str, ...] | None = None
 
 
 @dataclass

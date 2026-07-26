@@ -26,13 +26,43 @@ FROM python:3.11-slim
 #          kubernetes-mcp-server, @elastic/mcp-server-elasticsearch) that the
 #          agent SDK spawns on demand.
 #
+# The rest are the toolchain the anthropics/skills document skills shell out to
+# (see jean.json). Their SKILL.md files all say the same thing -- "preinstalled,
+# do NOT run npm/pip install first" -- and they mean it two ways here: an
+# install at turn time is classified RISKY (approval/risk.py `_PROD_INFRA`
+# matches `pip install` / `npm install`), so it costs a human click, and it
+# lands in a pod filesystem that dies with the pod. Bake them in or the skills
+# are decorative:
+#  - libreoffice-{writer,calc,impress}: `soffice`, used to recalculate xlsx
+#          formulas, convert to PDF, and render pptx slide thumbnails. Deliberately
+#          no default-jre: the skills drive Basic macros, which need no Java.
+#  - fonts-liberation: metric-compatible Arial/Times/Courier substitutes, so a
+#          rendered document paginates like the one the requester will open.
+#  - pandoc: docx <-> markdown conversion.
+#  - poppler-utils: `pdftoppm`, how the skills rasterize a PDF to check their
+#          own output before handing it over.
+#
 # `uv` (installed below) is a RUNTIME dependency too, not just the build tool
 # that runs `uv sync`: it ships `uvx`, and the grafana plugin's MCP server is
 # spawned as `uvx mcp-grafana`. Dropping uv from the final image -- e.g. when
 # making this multi-stage -- would take grafana's tools down with it.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl git openssh-client nodejs npm \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates curl git openssh-client nodejs npm \
+        libreoffice-writer libreoffice-calc libreoffice-impress \
+        fonts-liberation pandoc poppler-utils \
     && rm -rf /var/lib/apt/lists/*
+
+# Node libraries the docx/pptx skills `require()` directly. Installed globally
+# with an explicit prefix (rather than relying on npm's default) so NODE_PATH
+# can name the resulting dir: the skills write throwaway scripts under the
+# agent's workspace, which has no node_modules of its own and no package.json,
+# so `require('docx')` resolves only via NODE_PATH.
+ENV NPM_CONFIG_PREFIX=/usr/local
+ENV NODE_PATH=/usr/local/lib/node_modules
+RUN npm install -g --no-fund --no-audit \
+        docx pptxgenjs sharp react react-dom react-icons \
+    && npm cache clean --force
 
 RUN pip install --no-cache-dir uv
 
@@ -46,6 +76,17 @@ RUN uv sync --no-dev --no-install-project
 COPY src ./src
 COPY README.md ./
 RUN uv sync --no-dev
+
+# Python libraries the xlsx/pptx/docx skills import. These are NOT jean's own
+# dependencies -- jean never imports them; the agent's scripts do -- so they
+# stay out of pyproject.toml and land in the same venv only because that is
+# what `python3` resolves to once PATH is set below.
+#
+# MUST stay after the last `uv sync`: sync makes the venv match the lockfile
+# exactly and would prune every one of these back out again. Adding another
+# sync below this line silently disarms the document skills.
+RUN uv pip install --python /app/.venv/bin/python --no-cache-dir \
+        openpyxl pandas 'markitdown[docx,pptx,xlsx,pdf]' Pillow defusedxml lxml
 
 ENV PATH="/app/.venv/bin:$PATH"
 

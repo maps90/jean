@@ -129,6 +129,25 @@ async def run() -> None:
     cell = _SoulCell(soul=await load_soul_data(settings))
     soul_provider = lambda: cell.soul  # noqa: E731
 
+    # Say out loud whether channel scoping is actually protecting anything. An empty
+    # `allowed_channels` means unrestricted (gateway/engagement.decide fails open --
+    # an unwritten section and a section listing nothing are indistinguishable, and
+    # failing closed would silence jean everywhere on upgrade). But soul.md tells its
+    # readers the restriction exists, so an operator must be able to see from the
+    # boot log which of the two they have.
+    _channels = soul_provider().allowed_channels
+    if _channels:
+        logger.info(
+            "channel scoping ACTIVE: %d allowed channel(s); elsewhere only the manager engages",
+            len(_channels),
+        )
+    else:
+        logger.warning(
+            "channel scoping INACTIVE: soul.md lists no allowed channels, so jean engages "
+            "in ANY channel it is invited to. Add an '## Allowed channels' section with "
+            "'- <#CHANNELID>' entries to restrict it."
+        )
+
     app = AsyncApp(token=settings.slack_bot_token)
     auth = await app.client.auth_test()
     bot_id = auth["user_id"]

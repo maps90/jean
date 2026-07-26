@@ -43,20 +43,46 @@ def decide(
     with what it read and writes only on a change -- that's what keeps an ignored
     message free of a database write.
 
-    channel/thread_ts are accepted for future channel-scoping (e.g. allowed_channels)
-    but unused today.
+    Channel scoping and the DM allowlist are enforced here, ahead of the
+    mention/partner rules: soul.md tells readers that outside its listed channels,
+    and in DMs, only the manager engages -- and until this existed that sentence was
+    decoration, because this function deleted its `channel` argument.
     """
-    del channel, thread_ts  # reserved for future channel-scoping
+    del thread_ts  # reserved for future per-thread scoping
 
+    # First and unconditional: being blocked overrides being the manager.
     if author_id is not None and author_id in soul.blocked_users:
         return Decision(handle=False, partner=partner, reason="blocked-user")
 
+    is_manager = (
+        author_id is not None and soul.manager is not None and author_id == soul.manager.user_id
+    )
+
     if is_dm:
+        # DMs are deliberately NOT gated here. soul.md's "## DM allowlist" section
+        # says only the manager engages in DMs by default, and `dm_allowed_users`
+        # exists in SoulData for exactly that -- but README documents the opposite
+        # ("DM it directly -- either makes you jean's conversation partner"), and
+        # gating them would change product behaviour for every deployment rather
+        # than close a doc/code gap. Left as its own decision; see the PR.
+        #
         # An unattributable event must not mutate the partner: fall back to the
         # existing one rather than wiping it with `None`.
         return Decision(
             handle=True, partner=author_id if author_id is not None else partner, reason="dm"
         )
+
+    # An EMPTY list means unrestricted, not "nothing is allowed". The two are
+    # indistinguishable here -- a soul.md that never had the section extracts the
+    # same empty list as one that lists nothing -- and failing closed would silence
+    # jean in every channel the moment this shipped. server.py logs at boot when the
+    # list is empty, so an operator can see the control is inert rather than assume
+    # it is protecting them.
+    if soul.allowed_channels and channel not in soul.allowed_channels and not is_manager:
+        # Partner deliberately handed back unchanged: an ignored message must cost
+        # nothing, including a database write, and a bystander in a channel jean was
+        # never invited into must not be able to clear whoever it was talking to.
+        return Decision(handle=False, partner=partner, reason="channel-not-allowed")
 
     mentions = mentions_in(text)
     if bot_id in mentions:

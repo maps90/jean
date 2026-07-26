@@ -77,10 +77,29 @@ def assert_ids_grounded(soul: SoulData, persona: str) -> None:
             raise ValueError(f"ungrounded id {id_!r} not found verbatim in IDENTITY.md")
 
 
+_HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
+
+
+def strip_comments(persona: str) -> str:
+    """Drop HTML comments before any id is read out of the persona.
+
+    The documented soul.md template explains each section with a commented-out
+    *example* -- `<!-- "- <@U0123ABCD> approves deploys and infra (scope:
+    deploy, release, infra)" -->`. Read literally, that granted the template's
+    placeholder id scoped approval authority on every real instance: an
+    authorization nobody wrote on purpose. A comment is documentation for the
+    human editing the file, never a grant, so it is removed before parsing
+    rather than filtered afterwards -- the same reasoning applies to a
+    commented-out manager, channel or blocked user.
+    """
+    return _HTML_COMMENT_RE.sub("", persona)
+
+
 def regex_fallback(persona: str) -> SoulData:
     """Deterministic, dependency-free extraction used when the LLM extractor
     is unavailable or fails validation/grounding. Every id it returns is read
     directly out of `persona`, so it is grounded by construction."""
+    persona = strip_comments(persona)
     mentions = _MENTION_RE.findall(persona)
     channels = _CHANNEL_RE.findall(persona)
 
@@ -117,8 +136,28 @@ def regex_fallback(persona: str) -> SoulData:
     )
 
 
+_JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
+
+
+def _json_object(raw: str) -> str:
+    """The JSON object out of a model reply that may be dressed up.
+
+    `claude-haiku-4-5` answers this prompt with a ```json fence around the
+    object, so a bare `json.loads` raised on every boot and every instance ran
+    on the degraded regex fallback -- silently, because the failure path logged
+    no reason. Rather than fight the model with prompt wording, take the widest
+    `{...}` span: that survives a fence, a bare object, and any "Here is the
+    extraction:" preamble. Nothing is trusted on the strength of having parsed
+    -- `assert_ids_grounded` still has to pass afterwards.
+    """
+    match = _JSON_OBJECT_RE.search(raw)
+    if match is None:
+        raise ValueError("model reply contained no JSON object")
+    return match.group(0)
+
+
 def _soul_from_json(raw: str) -> SoulData:
-    data = json.loads(raw)
+    data = json.loads(_json_object(raw))
     identity_data = data.get("identity") or {}
     manager_data = data.get("manager")
     return SoulData(
@@ -194,11 +233,18 @@ async def load_soul_data(settings: Settings, *, extractor: Extractor | None = No
         raw = await resolved(_SYSTEM_PROMPT, EXTRACTION_PROMPT + persona)
         soul = _soul_from_json(raw)
         assert_ids_grounded(soul, persona)
-    except Exception:
-        # Loudly: the fallback is a *degraded* parse, and a soul that silently
-        # loses its approvers turns every approval into one nobody can click.
+    except Exception as exc:
+        # Loudly, and WITH the reason: the fallback is a *degraded* parse, and a
+        # soul that silently loses its approvers turns every approval into one
+        # nobody can click. A bare "extraction failed" hid a one-line
+        # JSONDecodeError (an unstripped ```json fence) for as long as it took
+        # someone to reproduce the call by hand -- the reason belongs in the log,
+        # not in a debugging session.
         logger.warning(
-            "soul extraction failed; falling back to regex parse of %s", settings.identity_path
+            "soul extraction failed (%s: %s); falling back to regex parse of %s",
+            type(exc).__name__,
+            exc,
+            settings.identity_path,
         )
         soul = regex_fallback(persona)
         logger.warning(

@@ -95,6 +95,7 @@ def build_session_factory(
             settle_timeout=settings.settle_timeout,
             settle_interval=settings.settle_interval,
             settle_quiet=settings.settle_quiet,
+            slow_turn_seconds=settings.slow_turn_seconds,
         )
 
     return session_factory

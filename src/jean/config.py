@@ -112,6 +112,13 @@ class Settings(BaseSettings):
     settle_timeout: float = 10.0
     settle_interval: float = 0.1
     settle_quiet: float = 1.0
+    # Post a heads-up in the thread if a turn is still running after this many
+    # seconds; 0 disables. A turn's wall clock is dominated by model generation --
+    # 149s for a metrics-and-logs investigation is normal and 99% of it is tokens
+    # jean cannot speed up -- and `set_status` ("is thinking...") only renders in
+    # Slack's Assistant pane, so a channel shows nothing at all until the answer
+    # lands. Silence for minutes reads as broken; this makes the wait legible.
+    slow_turn_seconds: float = 20.0
 
     @field_validator("effort", mode="before")
     @classmethod

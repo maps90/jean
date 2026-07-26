@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import logging
 import math
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -39,6 +40,11 @@ SPEAKING_TOOLS = frozenset(
         "mcp__jean_slack__request_approval",
     }
 )
+
+# Posted mid-turn when a turn outruns `slow_turn_seconds`. Deliberately vague about
+# what is happening: jean cannot see inside the model's reasoning, and inventing a
+# progress claim it cannot substantiate would be worse than saying nothing precise.
+SLOW_TURN_NOTICE = "_on it \u2014 this one's taking a while, still working._"
 
 # Said when a turn ends having neither spoken nor produced any text to fall back on.
 # Silence is the one outcome that must never reach the thread: it is indistinguishable
@@ -116,6 +122,11 @@ class JeanSession:
         settle_timeout: float = 10.0,
         settle_interval: float = 0.1,
         settle_quiet: float = 1.0,
+        # Post a heads-up if the turn is still running after this many seconds.
+        # 0 disables. Not unconditional on purpose: an "on it" on every quick
+        # lookup is noise, and the persona instruction says as much -- what needs
+        # acknowledging is the turn that runs long enough to look broken.
+        slow_turn_seconds: float = 20.0,
     ) -> None:
         self._channel = channel
         self._thread_ts = thread_ts
@@ -129,6 +140,7 @@ class JeanSession:
         self._settle_timeout = settle_timeout
         self._settle_interval = settle_interval
         self._settle_quiet = settle_quiet
+        self._slow_turn_seconds = slow_turn_seconds
         self._client: Any | None = None
         # The permission mode the cached client was opened with; the SDK fixes
         # it at connect, so a later /mode only lands on a fresh client.
@@ -138,6 +150,11 @@ class JeanSession:
         self._live_sid: str | None = None  # id of the .jsonl the OPEN client writes to
         self._archived = False  # is the store's copy up to date with local disk?
         self._busy = False  # is a turn in flight? (the idle sweeper must not close us)
+        # Per-turn counters, reset at the top of each run_turn and read by its
+        # completion log. Initialized here so they exist before the first turn.
+        self._rounds = 0
+        self._tools = 0
+        self._spoke = False
 
     @property
     def busy(self) -> bool:
@@ -429,8 +446,41 @@ class JeanSession:
                 self._thread_ts,
             )
 
+    async def _heads_up_after(self, seconds: float) -> None:
+        """Say something in the thread if the turn is still running after `seconds`.
+
+        `set_status` ("is thinking...") only renders in Slack's Assistant pane, so a
+        channel shows nothing at all between the question and the answer. Turns here
+        routinely run minutes -- 149s for a metrics-and-logs investigation is normal,
+        and 99% of that is the model generating tokens, not anything jean can speed
+        up. Silence for that long is indistinguishable from being broken, which is
+        what it kept getting mistaken for.
+
+        Best-effort: this is a nicety, not the answer, so a Slack failure is logged
+        and swallowed rather than allowed to fail the turn.
+        """
+        try:
+            await asyncio.sleep(seconds)
+            await self._chat.reply(self._channel, self._thread_ts, SLOW_TURN_NOTICE)
+        except asyncio.CancelledError:
+            raise  # the turn finished first -- nothing to say
+        except Exception:
+            logger.warning(
+                "could not post the slow-turn heads-up for %s/%s",
+                self._channel,
+                self._thread_ts,
+                exc_info=True,
+            )
+
     async def run_turn(self, text: str) -> None:
         self._busy = True
+        started = time.monotonic()
+        self._rounds = 0
+        self._tools = 0
+        self._spoke = False
+        heads_up: asyncio.Task[None] | None = None
+        if self._slow_turn_seconds > 0:
+            heads_up = asyncio.create_task(self._heads_up_after(self._slow_turn_seconds))
         await self._chat.set_status(self._channel, self._thread_ts, "is thinking...")
         try:
             # One read of the row serves both reasons a cached client can be wrong.
@@ -493,7 +543,12 @@ class JeanSession:
                 # runtime if it ever drifts.
                 if type(msg).__name__ == ASSISTANT_MESSAGE_CLASS_NAME:
                     assistant_msgs += 1
+                    self._rounds = assistant_msgs
+                    self._tools += sum(
+                        1 for b in _blocks_of(msg) if getattr(b, "name", None) is not None
+                    )
                     spoke = spoke or _called_a_speaking_tool(msg)
+                    self._spoke = spoke
                     text = _text_of(msg)
                     if text:
                         # Keep only the latest: earlier text is the model narrating
@@ -583,6 +638,28 @@ class JeanSession:
             raise
         finally:
             self._busy = False
+            if heads_up is not None:
+                # Cancel first: a "still working" note landing AFTER the answer reads
+                # as a second, contradictory turn.
+                heads_up.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await heads_up
+            # One line per turn, whether it succeeded or raised. Without it the only
+            # way to answer "how long did that take" was to read the CLI's JSONL
+            # transcript or query sessions.turn_seq -- and `ps` on the CLI child is
+            # actively misleading, because jean keeps it alive for the whole idle
+            # window after the turn, so its elapsed time is session age, not turn
+            # duration. `spoke=False` is the signal that _speak_for_it had to cover
+            # for a turn that never called a jean_slack tool.
+            logger.info(
+                "turn done %s/%s secs=%.1f rounds=%d tools=%d spoke=%s",
+                self._channel,
+                self._thread_ts,
+                time.monotonic() - started,
+                self._rounds,
+                self._tools,
+                self._spoke,
+            )
             # "" clears the assistant thread status (see slack/client.py).
             await self._chat.set_status(self._channel, self._thread_ts, "")
 

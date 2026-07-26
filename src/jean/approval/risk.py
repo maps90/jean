@@ -45,7 +45,19 @@ _DESTRUCTIVE = re.compile(
     | \bdelete\s+from\b
     | \bmkfs\b
     | \bdd\s+if=
-    | >\s*/dev/
+    # A redirect into /dev/ EXCEPT the pseudo-devices that appear in ordinary
+    # commands. `>\s*/dev/` on its own matched `2>/dev/null` -- the commonest
+    # shell idiom there is -- so every command that silenced stderr was
+    # classified destructive and interrupted a human for an `ls`. Measured
+    # against real traffic before this fix: 2 of 155 tool calls prompted, and
+    # both were `ls ... 2>/dev/null`.
+    #
+    # Excluding rather than enumerating block devices is deliberate: an
+    # unfamiliar node under /dev/ still asks, so `> /dev/some-new-thing` is
+    # RISKY by default. Only the handful of targets that are harmless BY
+    # DEFINITION are listed. Note this deliberately still fires on any fd
+    # (`2> /dev/sdb` is a device write however you spell it).
+    | >\s*/dev/(?!(?:null|zero|stdout|stderr|tty|fd/)\b)
     """,
     re.IGNORECASE | re.VERBOSE,
 )

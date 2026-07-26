@@ -7,7 +7,9 @@ import os
 import re
 from collections.abc import Awaitable, Callable
 from pathlib import Path
+from typing import Any
 
+from jean.plugins.overlay import MANIFEST, build_overlay, resolve_within
 from jean.ports import PluginRef, ResolvedPlugin
 
 GitRunner = Callable[[list[str], Path], Awaitable[None]]
@@ -90,9 +92,7 @@ class GitMarketplaceResolver:
             key = (e.marketplace, e.ref)
             if key not in clones:
                 clones[key] = await self._clone(e)
-            plugin_dir = clones[key] / "plugins" / e.plugin
-            self._validate(clones[key], plugin_dir, e)
-            out.append(ResolvedPlugin(name=e.plugin, path=str(plugin_dir)))
+            out.append(ResolvedPlugin(name=e.plugin, path=str(self._plugin_dir(clones[key], e))))
         return out
 
     async def _clone(self, e: PluginRef) -> Path:
@@ -113,16 +113,59 @@ class GitMarketplaceResolver:
             )
         return dest
 
-    def _validate(self, clone: Path, plugin_dir: Path, e: PluginRef) -> None:
+    def _plugin_dir(self, clone: Path, e: PluginRef) -> Path:
+        """The dir handed to the CLI as `--plugin-dir` for this entry.
+
+        Marketplaces disagree on layout, so the manifest decides rather than a
+        hardcoded path: the marketplace says `source: "./plugins/<name>"` and ships
+        a `plugin.json` in each, anthropics/skills says `source: "./"` for
+        every plugin and ships none. Only the second case needs an overlay
+        (see plugins/overlay.py); anything already carrying its own manifest is
+        handed over untouched. `plugins/<name>` stays the fallback for a
+        marketplace with no manifest entry at all.
+        """
+        entry = self._entry(clone, e)
+        source = entry.get("source") if entry else None
+        if source is None:
+            plugin_dir = clone / "plugins" / e.plugin
+        elif isinstance(source, str):
+            plugin_dir = resolve_within(clone, source)
+        else:
+            # A remote `source` object ({"source": "github", "repo": ...}) would
+            # mean cloning a second repo; jean resolves one marketplace per entry.
+            raise RuntimeError(
+                f"plugin '{e.plugin}' in {e.marketplace} uses a non-local source; "
+                "point jean.json at the repo that actually holds it"
+            )
+
         if not plugin_dir.is_dir():
             raise RuntimeError(f"plugin '{e.plugin}' not found in {e.marketplace}@{e.ref}")
+        if (plugin_dir / MANIFEST).is_file():
+            return plugin_dir
+
+        skills = entry.get("skills") if entry else None
+        if isinstance(skills, list) and skills:
+            return build_overlay(
+                plugin=e.plugin,
+                description=entry.get("description") if entry else None,
+                source_dir=plugin_dir,
+                skills=[s for s in skills if isinstance(s, str)],
+                overlay_root=self._cache_dir / "overlays" / _clone_key(e.marketplace, e.ref),
+            )
+        # No manifest and nothing to overlay from: hand it over as-is and let
+        # the CLI say what it dislikes about it.
+        return plugin_dir
+
+    def _entry(self, clone: Path, e: PluginRef) -> dict[str, Any] | None:
         mp = clone / ".claude-plugin" / "marketplace.json"
-        listed = (
-            {p.get("name") for p in json.loads(mp.read_text()).get("plugins", [])}
-            if mp.exists()
-            else set()
-        )
-        if listed and e.plugin not in listed:
+        if not mp.exists():
+            return None
+        plugins = json.loads(mp.read_text()).get("plugins", [])
+        for p in plugins:
+            if isinstance(p, dict) and p.get("name") == e.plugin:
+                return p
+        if plugins:
             raise RuntimeError(
                 f"plugin '{e.plugin}' not listed in {e.marketplace} marketplace.json"
             )
+        return None

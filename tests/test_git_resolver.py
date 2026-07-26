@@ -102,3 +102,82 @@ async def test_missing_plugin_raises(tmp_path):
         await r.resolve(
             [PluginRef("git@github.com:example-org/skills.git", "elasticsearch", "main")]
         )
+
+
+def _make_inline_runner(entries: list[dict], skills: list[str]):
+    """Simulate anthropics/skills: every plugin declared inline in
+    marketplace.json against `source: "./"`, with no plugin.json anywhere."""
+
+    async def runner(args: list[str], cwd: Path) -> None:
+        if args[0] != "clone":
+            return
+        dest = Path(args[-1])
+        (dest / ".git").mkdir(parents=True, exist_ok=True)
+        mp = dest / ".claude-plugin"
+        mp.mkdir(parents=True, exist_ok=True)
+        (mp / "marketplace.json").write_text(json.dumps({"plugins": entries}))
+        for s in skills:
+            d = dest / "skills" / s
+            d.mkdir(parents=True, exist_ok=True)
+            (d / "SKILL.md").write_text(f"---\nname: {s}\n---\n")
+
+    return runner
+
+
+async def test_source_pointing_at_repo_root_resolves_to_an_overlay(tmp_path):
+    entries = [
+        {
+            "name": "document-skills",
+            "source": "./",
+            "description": "docs",
+            "skills": ["./skills/docx", "./skills/xlsx"],
+        },
+        {"name": "example-skills", "source": "./", "skills": ["./skills/frontend-design"]},
+    ]
+    runner = _make_inline_runner(entries, ["docx", "xlsx", "pdf", "frontend-design"])
+    r = GitMarketplaceResolver(token=None, cache_dir=tmp_path, runner=runner)
+    out = await r.resolve(
+        [
+            PluginRef("https://github.com/anthropics/skills.git", "document-skills", "main"),
+            PluginRef("https://github.com/anthropics/skills.git", "example-skills", "main"),
+        ]
+    )
+
+    docs, examples = (Path(p.path) for p in out)
+    assert docs != examples, "plugins sharing `source: ./` must not share a dir"
+    for p in (docs, examples):
+        assert (p / ".claude-plugin" / "plugin.json").is_file()
+    assert sorted(d.name for d in (docs / "skills").iterdir()) == ["docx", "xlsx"]
+    assert [d.name for d in (examples / "skills").iterdir()] == ["frontend-design"]
+
+
+async def test_plugin_with_its_own_manifest_is_used_verbatim(tmp_path):
+    """the marketplace ships a real plugin.json per plugin -- never overlay those."""
+
+    async def runner(args: list[str], cwd: Path) -> None:
+        if args[0] != "clone":
+            return
+        dest = Path(args[-1])
+        (dest / ".git").mkdir(parents=True, exist_ok=True)
+        mp = dest / ".claude-plugin"
+        mp.mkdir(parents=True, exist_ok=True)
+        (mp / "marketplace.json").write_text(
+            json.dumps({"plugins": [{"name": "kubectl", "source": "./plugins/kubectl"}]})
+        )
+        pdir = dest / "plugins" / "kubectl" / ".claude-plugin"
+        pdir.mkdir(parents=True, exist_ok=True)
+        (pdir / "plugin.json").write_text(json.dumps({"name": "kubectl"}))
+
+    r = GitMarketplaceResolver(token=None, cache_dir=tmp_path, runner=runner)
+    out = await r.resolve(
+        [PluginRef("git@github.com:example-org/skills.git", "kubectl", "main")]
+    )
+    assert Path(out[0].path).name == "kubectl"
+    assert Path(out[0].path).parent.name == "plugins"
+
+
+async def test_source_escaping_the_clone_raises(tmp_path):
+    runner = _make_inline_runner([{"name": "evil", "source": "../../etc"}], [])
+    r = GitMarketplaceResolver(token=None, cache_dir=tmp_path, runner=runner)
+    with pytest.raises(RuntimeError, match="escapes"):
+        await r.resolve([PluginRef("https://github.com/x/y.git", "evil", "main")])

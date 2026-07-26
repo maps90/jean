@@ -144,6 +144,8 @@ def build_agent_options(
         can_use_tool=can_use_tool,
         resume=resume,
         model=settings.model,
+        # None leaves the CLI's own default in place -- see Settings.effort.
+        effort=settings.effort,
         cwd=str(settings.home / "workspaces"),
         stderr=_log_cli_stderr,
     )

@@ -17,6 +17,10 @@ def mentions_in(text: str) -> list[str]:
 class Decision:
     handle: bool
     partner: str | None  # the thread's partner AFTER this message
+    # Which branch decided, for the log. Engagement is the one place where doing
+    # nothing is a legitimate outcome, so "no reply" is ambiguous by design --
+    # this is what makes it greppable instead of a mystery.
+    reason: str = ""
 
 
 def decide(
@@ -45,19 +49,23 @@ def decide(
     del channel, thread_ts  # reserved for future channel-scoping
 
     if author_id is not None and author_id in soul.blocked_users:
-        return Decision(handle=False, partner=partner)
+        return Decision(handle=False, partner=partner, reason="blocked-user")
 
     if is_dm:
         # An unattributable event must not mutate the partner: fall back to the
         # existing one rather than wiping it with `None`.
-        return Decision(handle=True, partner=author_id if author_id is not None else partner)
+        return Decision(
+            handle=True, partner=author_id if author_id is not None else partner, reason="dm"
+        )
 
     mentions = mentions_in(text)
     if bot_id in mentions:
         # Most recent mention wins: whoever addresses her is who she's talking to.
         # An unattributable author leaves the existing partner alone rather than
         # wiping it -- an anonymous or bot-authored event must not clear it.
-        return Decision(handle=True, partner=author_id if author_id is not None else partner)
+        return Decision(
+            handle=True, partner=author_id if author_id is not None else partner, reason="mention"
+        )
 
     if mentions:
         # Someone else was addressed. Only the current partner can disengage her
@@ -65,13 +73,13 @@ def decide(
         # mentioning anyone else is as inert as their plain chatter and must not
         # touch the partner.
         if author_id is not None and author_id == partner:
-            return Decision(handle=False, partner=None)
-        return Decision(handle=False, partner=partner)
+            return Decision(handle=False, partner=None, reason="handoff")
+        return Decision(handle=False, partner=partner, reason="other-mentioned")
 
     if author_id is not None and author_id == partner:
         # The partner's plain follow-up: no re-@mention needed.
-        return Decision(handle=True, partner=partner)
+        return Decision(handle=True, partner=partner, reason="partner-followup")
 
     # Anyone else's plain message. This is the line the whole feature exists for:
     # no turn, no tokens, and no place in the thread's lock queue.
-    return Decision(handle=False, partner=partner)
+    return Decision(handle=False, partner=partner, reason="not-addressed")

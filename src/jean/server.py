@@ -256,7 +256,12 @@ async def run() -> None:
     )
 
     gw = Gateway(
-        store=store, manager=manager, gate=gate, bot_id=bot_id, soul_provider=soul_provider
+        store=store,
+        manager=manager,
+        gate=gate,
+        bot_id=bot_id,
+        soul_provider=soul_provider,
+        chat=chat,
     )
     register(app, gw)
 

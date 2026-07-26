@@ -10,6 +10,11 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from jean.persona.model import USER_ID_RE
 
+# The CLI's `--effort` levels (claude-agent-sdk `EffortLevel`). Validated here so
+# a typo fails the boot rather than the first turn, where it would surface as a
+# dead reply after a human already waited on one.
+ALLOWED_EFFORT_LEVELS = frozenset({"low", "medium", "high", "xhigh", "max"})
+
 
 class Settings(BaseSettings):
     """jean runtime configuration.
@@ -63,6 +68,15 @@ class Settings(BaseSettings):
     permission_mode: str = "default"
     health_port: int = 8080
     model: str | None = None
+    # How hard the model works per turn. Unset = let the CLI pick its own default
+    # (`xhigh`), which is what every deployment ran before this existed. This is
+    # the primary latency/cost lever: a turn's wall clock is dominated by the
+    # tokens the model generates, and effort is what governs how many of those
+    # there are -- lower effort means less thinking, less preamble, and more
+    # consolidated tool calls. Lower it far enough and the model under-thinks
+    # multi-step work, so it belongs in config where a deployment can sweep it
+    # against its own traffic, not hardcoded here.
+    effort: str | None = None
     soul_parse_model: str = "claude-haiku-4-5-20251001"
 
     # External file paths (mountable from a Secret); default under home.
@@ -98,6 +112,28 @@ class Settings(BaseSettings):
     settle_timeout: float = 10.0
     settle_interval: float = 0.1
     settle_quiet: float = 1.0
+
+    @field_validator("effort", mode="before")
+    @classmethod
+    def _valid_effort(cls, value: object) -> str | None:
+        """Normalize and validate the effort level at boot.
+
+        Empty is treated as unset: clearing a key in a mounted Secret leaves an
+        empty string, and that should mean "let the CLI decide" rather than a
+        refusal to start. Case and padding are forgiven because the value is
+        typically pasted by a human; an unknown level is not, because the CLI
+        would only reject it once a turn was already running.
+        """
+        if value is None:
+            return None
+        level = str(value).strip().lower()
+        if not level:
+            return None
+        if level not in ALLOWED_EFFORT_LEVELS:
+            raise ValueError(
+                f"JEAN_EFFORT must be one of {', '.join(sorted(ALLOWED_EFFORT_LEVELS))}: {value!r}"
+            )
+        return level
 
     @field_validator("db_schema")
     @classmethod

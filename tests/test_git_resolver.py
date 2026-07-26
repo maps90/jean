@@ -176,6 +176,67 @@ async def test_plugin_with_its_own_manifest_is_used_verbatim(tmp_path):
     assert Path(out[0].path).parent.name == "plugins"
 
 
+def _make_token_rejecting_runner(plugins: list[str]):
+    """A marketplace the token has no grant on -- a repo-scoped installation
+    token or fine-grained PAT gets 'Repository not found' on any other repo,
+    public or not."""
+    calls: list[list[str]] = []
+    base_runner, _ = _make_fake_runner(plugins)
+
+    async def runner(args: list[str], cwd: Path) -> None:
+        calls.append(args)
+        if args[0] == "clone" and any("x-access-token" in a for a in args):
+            dest = Path(args[-1])
+            dest.mkdir(parents=True, exist_ok=True)  # git leaves a partial dir behind
+            raise RuntimeError("git clone failed: remote: Repository not found.")
+        await base_runner(args, cwd)
+
+    return runner, calls
+
+
+async def test_public_marketplace_retries_anonymously_when_the_token_is_rejected(tmp_path):
+    runner, calls = _make_token_rejecting_runner(["document-skills"])
+    r = GitMarketplaceResolver(token="ghp_scoped_to_another_org", cache_dir=tmp_path, runner=runner)
+    out = await r.resolve(
+        [PluginRef("https://github.com/anthropics/skills.git", "document-skills", "main")]
+    )
+
+    assert Path(out[0].path).is_dir()
+    clones = [c for c in calls if c[0] == "clone"]
+    assert len(clones) == 2
+    assert any("x-access-token" in a for a in clones[0])
+    assert not any("x-access-token" in a for a in clones[1])
+
+
+async def test_tokenless_clone_failure_is_not_retried(tmp_path):
+    """Nothing to fall back to -- the second attempt would be the same url."""
+    calls: list[list[str]] = []
+
+    async def runner(args: list[str], cwd: Path) -> None:
+        calls.append(args)
+        raise RuntimeError("git clone failed: host unreachable")
+
+    r = GitMarketplaceResolver(token=None, cache_dir=tmp_path, runner=runner)
+    with pytest.raises(RuntimeError, match="host unreachable"):
+        await r.resolve([PluginRef("https://github.com/x/y.git", "p", "main")])
+    assert len([c for c in calls if c[0] == "clone"]) == 1
+
+
+async def test_ssh_clone_failure_is_not_retried(tmp_path):
+    """An SSH url carries no token to drop, so there is no anonymous retry --
+    and silently switching transports would be a surprise."""
+    calls: list[list[str]] = []
+
+    async def runner(args: list[str], cwd: Path) -> None:
+        calls.append(args)
+        raise RuntimeError("git clone failed: Permission denied (publickey).")
+
+    r = GitMarketplaceResolver(token="ghp_x", cache_dir=tmp_path, runner=runner)
+    with pytest.raises(RuntimeError, match="publickey"):
+        await r.resolve([PluginRef("git@github.com:example-org/skills.git", "kubectl", "main")])
+    assert len([c for c in calls if c[0] == "clone"]) == 1
+
+
 async def test_source_escaping_the_clone_raises(tmp_path):
     runner = _make_inline_runner([{"name": "evil", "source": "../../etc"}], [])
     r = GitMarketplaceResolver(token=None, cache_dir=tmp_path, runner=runner)

@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
@@ -99,12 +100,30 @@ class GitMarketplaceResolver:
         dest = self._cache_dir / _clone_key(e.marketplace, e.ref)
         if not (dest / ".git").exists():
             url = _auth_url(e.marketplace, self._token)
+            tokenless = _auth_url(e.marketplace, None)
             # Full clone (not --depth/--branch) so `ref` may be a branch, tag,
             # OR a commit SHA -- GitHub's smart HTTP won't fetch an arbitrary
             # shallow SHA, so we clone then check the ref out explicitly.
-            await self._run(["clone", url, str(dest)], self._cache_dir)
+            try:
+                await self._run(["clone", url, str(dest)], self._cache_dir)
+            except RuntimeError:
+                # `JEAN_MARKETPLACE_TOKEN` is provisioned for the org's OWN
+                # marketplace, and a repo-scoped installation token or
+                # fine-grained PAT is rejected on every other repo -- including
+                # public ones, where GitHub answers "Repository not found"
+                # rather than falling back to anonymous access. A third-party
+                # public marketplace (anthropics/skills) would therefore fail
+                # to clone purely because a token for someone else's repo was
+                # in the url. Retry once with no credential: what succeeds
+                # anonymously is public by definition, so this grants no access
+                # the token was withholding. SSH carries no token to drop, and
+                # switching its transport would be a surprise, so it never
+                # reaches here.
+                if url == tokenless or _is_ssh(e.marketplace):
+                    raise
+                shutil.rmtree(dest, ignore_errors=True)  # git leaves a partial dir
+                await self._run(["clone", tokenless, str(dest)], self._cache_dir)
             # Strip the token from the persisted remote so it never lingers on disk.
-            tokenless = _auth_url(e.marketplace, None)
             await self._run(
                 ["-C", str(dest), "remote", "set-url", "origin", tokenless], self._cache_dir
             )

@@ -99,21 +99,27 @@ def _session(chat, stream, tmp_path):
 # --- the failure this exists for -------------------------------------------
 
 
-async def test_a_turn_that_never_spoke_falls_back_to_its_text(tmp_path, caplog):
+async def test_a_turn_that_never_spoke_still_delivers_its_text(tmp_path, caplog):
     """JEAN_EFFORT=low made the model finish a full investigation and end the turn
-    without calling mcp__jean_slack__reply. jean's only output path is that tool,
-    so the human saw a reaction and nothing else -- while the answer sat in the
-    assistant text jean had already received."""
+    without calling mcp__jean_slack__reply -- the human saw a reaction and nothing
+    else, while the answer sat in assistant text jean had already received.
+
+    Delivering it is now the NORMAL path rather than a rescue (it recurred at every
+    effort level tried), so this is logged at INFO. The WARNING this test used to
+    assert on is gone deliberately."""
     chat = FakeChat()
     stream = [
         AssistantMessage([TextBlock("Root cause: disk watermark at 87%.")]),
         FakeResultMessage(session_id="s1"),
     ]
-    with caplog.at_level(logging.WARNING, logger="jean.session"):
+    with caplog.at_level(logging.INFO, logger="jean.session"):
         await _session(chat, stream, tmp_path).run_turn("why is ES yellow?")
 
     assert [t for _, _, t in chat.replies] == ["Root cause: disk watermark at 87%."]
-    assert "without" in " ".join(r.getMessage() for r in caplog.records).lower()
+    assert "delivered" in " ".join(r.getMessage() for r in caplog.records).lower()
+    assert [
+        r for r in caplog.records if r.funcName == "_deliver" and r.levelno >= logging.WARNING
+    ] == []
 
 
 async def test_a_turn_that_replied_is_left_alone(tmp_path):

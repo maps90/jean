@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import logging
 import math
+import re
 import time
 from collections.abc import Callable
 from typing import Any
@@ -27,11 +28,10 @@ logger = logging.getLogger(__name__)
 ASSISTANT_MESSAGE_CLASS_NAME = "AssistantMessage"
 
 # The `jean_slack` tools that put something a human can READ into the thread. A turn
-# that called none of them said nothing, however much text it generated: jean's system
-# prompt tells the agent its plain output is invisible, and it is -- run_turn forwards
-# none of it. react/unreact are deliberately absent: an emoji acknowledges, it never
-# answers, and a turn whose only visible act was a reaction is exactly the silent
-# failure this guards. request_approval counts because it posts a Block Kit message.
+# that called one of them has already spoken, so `_deliver` stays out of the way and
+# the final message is not sent as well. react/unreact are deliberately absent: an
+# emoji acknowledges, it never answers. request_approval counts because it posts a
+# Block Kit message.
 SPEAKING_TOOLS = frozenset(
     {
         "mcp__jean_slack__reply",
@@ -46,7 +46,7 @@ SPEAKING_TOOLS = frozenset(
 # progress claim it cannot substantiate would be worse than saying nothing precise.
 SLOW_TURN_NOTICE = "_on it \u2014 this one's taking a while, still working._"
 
-# Said when a turn ends having neither spoken nor produced any text to fall back on.
+# Said when a turn ends having neither spoken nor produced any text to deliver.
 # Silence is the one outcome that must never reach the thread: it is indistinguishable
 # from jean being broken, which sends people debugging the gateway, the database and
 # Slack for something the model simply declined to say.
@@ -54,6 +54,27 @@ MUTE_TURN_NOTICE = (
     "I finished working on that but produced no reply -- nothing to show for it. "
     "Worth asking again, and worth a look at my logs if it keeps happening."
 )
+
+
+# Extensions the document skills actually produce. Deliberately narrow: an
+# investigation names paths constantly (`/etc/hosts`, `values.yaml`, a .jsonl), and a
+# broad match would append a spurious footnote to almost every answer.
+_DELIVERABLE_SUFFIXES = (".docx", ".xlsx", ".pptx", ".pdf", ".csv")
+_FILENAME_RE = re.compile(
+    r"[\w.\-]+(?:" + "|".join(re.escape(x) for x in _DELIVERABLE_SUFFIXES) + r")\b"
+)
+
+
+def _named_document(text: str) -> str | None:
+    """The first deliverable-looking filename in `text`, if any.
+
+    Used only to warn that a file was described but never uploaded -- automatic
+    delivery carries text, never an attachment. Matching is on the extension, not
+    on phrasing, because "here is X", "attached", "I built X" and silence-then-a-
+    filename are all the same mistake.
+    """
+    m = _FILENAME_RE.search(text)
+    return m.group(0) if m else None
 
 
 def _blocks_of(msg: object) -> list:
@@ -406,42 +427,57 @@ class JeanSession:
                 "failed to archive transcript for %s/%s", self._channel, self._thread_ts
             )
 
-    async def _speak_for_it(self, final_text: str | None) -> None:
-        """Post on behalf of a turn that finished without saying anything.
+    async def _deliver(self, final_text: str | None) -> None:
+        """Post the turn's final assistant message as the reply.
 
-        The agent's only route to the thread is a `jean_slack` tool call, and the
-        system prompt says so -- but a model can still end a turn having written its
-        answer as plain assistant text, which reaches jean and goes nowhere. Observed
-        for real at `JEAN_EFFORT=low`: a full Elasticsearch RCA, correct root cause,
-        `stop_reason: end_turn`, zero `jean_slack` calls. The turn looked like a
-        success from every angle jean records -- turn_seq bumped, no error -- while
-        the human saw only the acknowledging reaction.
+        This is the NORMAL path, not a rescue. Models end a turn treating their
+        final message as the answer -- that is the overwhelming prior, and it held
+        at every effort level tried -- so jean delivers it instead of insisting on a
+        tool call it cannot guarantee. The result is byte-identical either way: this
+        and `mcp__jean_slack__reply` both go through `chat.reply`, so the same
+        md_to_mrkdwn + chunk_text conversion applies. Only called when the agent did
+        NOT speak for itself, so it never double-posts.
 
-        So jean says it instead. Not best-effort: unlike a status or a reaction this
-        IS the answer, so a failure here is logged as an error rather than swallowed.
-        Warned either way, because a turn reaching this path means the model ignored
-        an explicit instruction and that is worth seeing in the logs.
+        Not best-effort: unlike a status or a reaction this IS the answer, so a
+        failure is logged as an error rather than swallowed. Logged at INFO because
+        which path delivered the answer is worth knowing and is not a defect; the
+        turn log's `spoke=` field is the same signal in aggregate.
         """
-        if final_text:
+        if final_text is None:
             logger.warning(
-                "turn on %s/%s ended without calling a jean_slack tool; posting its "
-                "final assistant text (%d chars) so the thread is not left silent",
+                "turn on %s/%s produced neither a jean_slack call nor any text; posting a "
+                "notice so the thread is not left silent",
+                self._channel,
+                self._thread_ts,
+            )
+            text = MUTE_TURN_NOTICE
+        else:
+            logger.info(
+                "delivered the final assistant message for %s/%s (%d chars)",
                 self._channel,
                 self._thread_ts,
                 len(final_text),
             )
-        else:
-            logger.warning(
-                "turn on %s/%s ended without calling a jean_slack tool and produced no "
-                "text to fall back on; posting a notice so the thread is not left silent",
-                self._channel,
-                self._thread_ts,
-            )
+            text = final_text
+            named = _named_document(final_text)
+            if named:
+                # The one thing automatic delivery cannot do. Prose describing a file
+                # that never arrived sends the reader hunting for an attachment, so
+                # say it plainly rather than leaving them to notice.
+                logger.warning(
+                    "turn on %s/%s named a file (%s) but never called upload; the thread "
+                    "gets the text without the attachment",
+                    self._channel,
+                    self._thread_ts,
+                    named,
+                )
+                text = f"{final_text}\n\n_(I named `{named}` above but did not attach it — ask and I'll upload it.)_"
+
         try:
-            await self._chat.reply(self._channel, self._thread_ts, final_text or MUTE_TURN_NOTICE)
+            await self._chat.reply(self._channel, self._thread_ts, text)
         except Exception:
             logger.exception(
-                "could not post the fallback reply for %s/%s -- this turn is silent",
+                "could not deliver the reply for %s/%s -- this turn is silent",
                 self._channel,
                 self._thread_ts,
             )
@@ -571,7 +607,7 @@ class JeanSession:
             # notice to every real reply. Staying quiet is the safe read of "I could not
             # tell"; `_settle`'s count_reliable warning already reports the same fault.
             if assistant_msgs and not spoke:
-                await self._speak_for_it(final_text)
+                await self._deliver(final_text)
 
             if sid is not None:
                 # Bump BEFORE archiving. The order is load-bearing, not tidiness:
@@ -649,8 +685,9 @@ class JeanSession:
             # transcript or query sessions.turn_seq -- and `ps` on the CLI child is
             # actively misleading, because jean keeps it alive for the whole idle
             # window after the turn, so its elapsed time is session age, not turn
-            # duration. `spoke=False` is the signal that _speak_for_it had to cover
-            # for a turn that never called a jean_slack tool.
+            # duration. `spoke=False` means the agent did not call a jean_slack tool
+            # and `_deliver` sent its final message instead -- the normal path, not a
+            # fault; it is logged because it is also when `upload` cannot have run.
             logger.info(
                 "turn done %s/%s secs=%.1f rounds=%d tools=%d spoke=%s",
                 self._channel,

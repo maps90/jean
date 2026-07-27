@@ -46,6 +46,17 @@ class ApprovalGate:
         self._manager_provider = manager_provider
         self._timeout_seconds = timeout_seconds
         self._env_approvers = env_approvers
+        # (channel, thread_ts) -> outstanding requests on that thread. Per-worker
+        # and best-effort BY DESIGN: it exists only so the turn's slow-turn notice
+        # can say "waiting on an approval" instead of "still working", and the
+        # worker that is waiting is the same one running the turn. Nothing about
+        # correctness depends on it, so it deliberately does not go to Postgres --
+        # the decision itself already does.
+        self._pending: dict[tuple[str, str], int] = {}
+
+    def pending_for(self, channel: str, thread_ts: str) -> bool:
+        """Does this thread have an approval outstanding on THIS worker?"""
+        return self._pending.get((channel, thread_ts), 0) > 0
 
     async def request(self, channel: str, thread_ts: str, summary: str) -> ApprovalDecision:
         approvers = select_approvers(
@@ -82,7 +93,15 @@ class ApprovalGate:
         await self._coordinator.set_approvers(approval_id, approvers)
         blocks = _build_blocks(approval_id, summary, approvers)
         ts = await self._post_blocks(channel, thread_ts, f"Approval requested: {summary}", blocks)
-        decision = await self._coordinator.wait(approval_id, self._timeout_seconds)
+        key = (channel, thread_ts)
+        self._pending[key] = self._pending.get(key, 0) + 1
+        try:
+            decision = await self._coordinator.wait(approval_id, self._timeout_seconds)
+        finally:
+            if self._pending.get(key, 0) <= 1:
+                self._pending.pop(key, None)
+            else:
+                self._pending[key] -= 1
         # The buttons are the clicker's only feedback, so retire them here --
         # on whichever worker is waiting, for every outcome (approve, deny,
         # timeout). Without this the message keeps its live buttons and a

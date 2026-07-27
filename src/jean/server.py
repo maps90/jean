@@ -71,6 +71,10 @@ def build_session_factory(
     options_factory_for: Callable[[str, str], OptionsFactory],
     client_factory: Callable[..., Any],
     local_transcripts: LocalTranscripts,
+    # Reports whether a thread has an approval outstanding, so the slow-turn notice
+    # can say "waiting on an approval" rather than "still working". Optional: a
+    # caller without a gate gets the honest default of "nothing pending".
+    approval_pending_for: Callable[[str, str], bool] = lambda _c, _t: False,
 ) -> Callable[[str, str], JeanSession]:
     """`store` is handed to JeanSession as both `store=` and `transcripts=`:
     PostgresStore satisfies SessionStore and TranscriptStore structurally, so
@@ -96,6 +100,7 @@ def build_session_factory(
             settle_interval=settings.settle_interval,
             settle_quiet=settings.settle_quiet,
             slow_turn_seconds=settings.slow_turn_seconds,
+            approval_pending=lambda: approval_pending_for(channel, thread_ts),
         )
 
     return session_factory
@@ -238,7 +243,9 @@ async def run() -> None:
         # its approval request -- into the wrong thread. The channel/thread are
         # known here, so close over them. A per-session Slack server is cheap:
         # in-process closures, not a child process.
-        can_use_tool = build_can_use_tool(gate, channel=channel, thread_ts=thread_ts)
+        can_use_tool = build_can_use_tool(
+            gate, channel=channel, thread_ts=thread_ts, fetch_hosts=settings.fetch_hosts
+        )
         slack_server, slack_tool_names, _tools = build_slack_mcp(
             chat, gate, channel=channel, thread_ts=thread_ts
         )
@@ -267,6 +274,7 @@ async def run() -> None:
         options_factory_for=options_factory_for,
         client_factory=ClaudeSDKClient,
         local_transcripts=local_transcripts,
+        approval_pending_for=gate.pending_for,
     )
 
     manager = SessionManager(

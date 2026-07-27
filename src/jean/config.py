@@ -119,6 +119,23 @@ class Settings(BaseSettings):
     # Slack's Assistant pane, so a channel shows nothing at all until the answer
     # lands. Silence for minutes reads as broken; this makes the wait legible.
     slow_turn_seconds: float = 20.0
+    # Hosts the agent may curl/wget without asking -- the systems this deployment
+    # is already configured for (grafana, elasticsearch, portico, api.github.com).
+    # Comma-separated. EMPTY (the default) gates every fetch, which is the
+    # behaviour before the destination rule existed. Sending data still asks
+    # wherever it goes; see approval/risk.py `_fetch_is_risky`.
+    fetch_allowed_hosts: str = ""
+
+    @property
+    def fetch_hosts(self) -> frozenset[str]:
+        """`fetch_allowed_hosts` as a normalized set (lowercased, port stripped)."""
+        out = set()
+        for raw in self.fetch_allowed_hosts.split(","):
+            host = raw.strip().lower().removeprefix("http://").removeprefix("https://")
+            host = host.split("/", 1)[0].split(":", 1)[0]
+            if host:
+                out.add(host)
+        return frozenset(out)
 
     @field_validator("effort", mode="before")
     @classmethod

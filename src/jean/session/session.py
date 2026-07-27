@@ -46,6 +46,14 @@ SPEAKING_TOOLS = frozenset(
 # progress claim it cannot substantiate would be worse than saying nothing precise.
 SLOW_TURN_NOTICE = "_on it \u2014 this one's taking a while, still working._"
 
+# Said instead of SLOW_TURN_NOTICE when the turn is parked on the approval gate.
+# The distinction is whose move it is: a slow turn is jean's, an approval wait is
+# the human's. Saying "still working" while blocked on a decision was actively
+# wrong -- reported in production as "i havent approve anything yet" -- and an
+# approval can sit for the full approval_ttl (30 min), so every long-parked turn
+# would have claimed progress it was not making.
+APPROVAL_WAIT_NOTICE = "_waiting on an approval above \u2014 nothing moves until it's decided._"
+
 # Said when a turn ends having neither spoken nor produced any text to deliver.
 # Silence is the one outcome that must never reach the thread: it is indistinguishable
 # from jean being broken, which sends people debugging the gateway, the database and
@@ -148,6 +156,11 @@ class JeanSession:
         # lookup is noise, and the persona instruction says as much -- what needs
         # acknowledging is the turn that runs long enough to look broken.
         slow_turn_seconds: float = 20.0,
+        # Reports whether this thread has an approval outstanding. Injected rather
+        # than reached for: session/ must not import the gate (CLAUDE.md layering),
+        # and a default of "nothing pending" keeps single-process and test wiring
+        # working without claiming an approval that does not exist.
+        approval_pending: Callable[[], bool] | None = None,
     ) -> None:
         self._channel = channel
         self._thread_ts = thread_ts
@@ -162,6 +175,7 @@ class JeanSession:
         self._settle_interval = settle_interval
         self._settle_quiet = settle_quiet
         self._slow_turn_seconds = slow_turn_seconds
+        self._approval_pending = approval_pending or (lambda: False)
         self._client: Any | None = None
         # The permission mode the cached client was opened with; the SDK fixes
         # it at connect, so a later /mode only lands on a fresh client.
@@ -497,7 +511,13 @@ class JeanSession:
         """
         try:
             await asyncio.sleep(seconds)
-            await self._chat.reply(self._channel, self._thread_ts, SLOW_TURN_NOTICE)
+            # Checked AFTER the wait, not before: the approval usually starts part
+            # way through the turn, so the state at turn start says nothing.
+            parked = False
+            with contextlib.suppress(Exception):
+                parked = bool(self._approval_pending())
+            notice = APPROVAL_WAIT_NOTICE if parked else SLOW_TURN_NOTICE
+            await self._chat.reply(self._channel, self._thread_ts, notice)
         except asyncio.CancelledError:
             raise  # the turn finished first -- nothing to say
         except Exception:

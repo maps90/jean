@@ -107,8 +107,7 @@ _SECRETS = re.compile(
 )
 _EXTERNAL = re.compile(
     r"""
-    \bcurl\b | \bwget\b
-    | \bscp\b
+    \bscp\b
     | \brsync\b.*(?:@[\w.-]+:|::)
     | \bgh\s+pr\s+create\b
     | \b(npm|pip|cargo|gem)\s+publish\b
@@ -165,14 +164,114 @@ _MCP_RISK = re.compile(
 )
 
 
-def classify_risk(tool_name: str, tool_input: dict[str, Any]) -> Risk:
-    """Deterministic risk of a tool call. Pure; reads structured args only."""
+# --- fetch (curl/wget): judged by DESTINATION, not by the word -------------
+#
+# `\bcurl\b` used to sit in _EXTERNAL, so every curl asked -- including
+# `curl -s -o /dev/null -w "%{http_code}" https://api.github.com`, a connectivity
+# probe that discards its own output. But curl is also the one command in the
+# agent's shell that can move data OUT: that shell can read JEAN_DATABASE_URL,
+# the Slack bot token, the Grafana and Elasticsearch tokens, the GitHub token and
+# the mounted kubernetes service-account token. The pod is disposable; those are
+# not. So the rule is not "allow curl" or "gate curl" but "where is it going":
+#
+#   - a host the deployment has configured (JEAN_FETCH_ALLOWED_HOSTS) -> expected
+#   - anything else -> a random URL, ask
+#   - a host jean cannot determine (`curl $TARGET`) -> ask; reading the variable
+#     NAME would be trivially defeated
+#
+# On a configured host the HTTP METHOD decides, because the methods differ in what
+# they can do to something that already exists:
+#
+#   - GET/HEAD/OPTIONS read, and POST creates something new (a query, a search
+#     body, a webhook, an annotation) -> no click. Requiring one made ordinary
+#     work -- POSTing an Elasticsearch query is a GET with a body -- unusable.
+#   - PUT/PATCH/DELETE replace, edit or destroy a resource that is already there.
+#     That is the same class of act as any other mutation jean asks about, and it
+#     is not undone by the pod being disposable: the damage is on the far side.
+#
+# An unrecognised explicit method asks. There is no list of "safe" verbs to fall
+# back on, and a method jean does not model is one it cannot reason about.
+#
+# Empty allowlist -- the default -- gates every fetch, so this cannot silently
+# open anything for a deployment that has not named its hosts.
+_FETCH_CMD = re.compile(r"\b(?:curl|wget)\b", re.IGNORECASE)
+# Read-or-create. Anything outside this set asks, so the gap is fail-closed.
+_FETCH_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "POST"})
+_EXPLICIT_METHOD = re.compile(
+    r"""(?:\s-X\s*|\s--request[\s=]*|\s--method[\s=]*)   # curl -X/--request, wget --method
+        ([A-Za-z]+)""",
+    re.IGNORECASE | re.VERBOSE,
+)
+# Flags that imply a method when none is given explicitly. -T/--upload-file is
+# curl's PUT; the body flags are its POST.
+_IMPLIES_PUT = re.compile(r"\s-T\b | \s--upload-file\b", re.IGNORECASE | re.VERBOSE)
+_IMPLIES_POST = re.compile(
+    r"""
+    \s-d\b | \s--data(?:-\w+)?\b        # -d / --data / --data-binary / --data-raw
+    | \s--json\b
+    | \s-F\b | \s--form\b
+    | \s--post-(?:data|file)\b          # wget
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+_URL_RE = re.compile(r"\bhttps?://([^\s/?#'\"]+)", re.IGNORECASE)
+
+
+def _fetch_methods(command: str) -> set[str]:
+    """Every HTTP method this command could use, upper-cased.
+
+    A compound command may hold several fetches (`curl A && curl -X DELETE B`),
+    and the classifier judges the whole string -- so collect all of them and let
+    the caller require every one to be acceptable.
+    """
+    explicit = {m.upper() for m in _EXPLICIT_METHOD.findall(command)}
+    if explicit:
+        return explicit
+    if _IMPLIES_PUT.search(command):
+        return {"PUT"}
+    if _IMPLIES_POST.search(command):
+        return {"POST"}
+    return {"GET"}
+
+
+def _fetch_is_risky(command: str, allowed_hosts: frozenset[str]) -> bool:
+    """True when a curl/wget in `command` deserves a human.
+
+    Host comparison is exact on the hostname (port stripped), never a substring:
+    `api.github.com.evil.tld` and `raw.api.github.com` must not inherit
+    `api.github.com`'s trust.
+    """
+    if not _FETCH_CMD.search(command):
+        return False
+    if not _FETCH_SAFE_METHODS.issuperset(_fetch_methods(command)):
+        return True
+    urls = _URL_RE.findall(command)
+    if not urls:
+        return True  # nothing to verify -- interpolated, or no URL at all
+    return any(u.rsplit("@", 1)[-1].split(":", 1)[0].lower() not in allowed_hosts for u in urls)
+
+
+def classify_risk(
+    tool_name: str,
+    tool_input: dict[str, Any],
+    *,
+    fetch_allowed_hosts: frozenset[str] = frozenset(),
+) -> Risk:
+    """Deterministic risk of a tool call. Pure; reads structured args only.
+
+    `fetch_allowed_hosts` is passed in rather than read from Settings so this stays
+    a pure function -- server.py derives it once and agent_options threads it here.
+    Empty (the default) means every curl/wget asks, i.e. the behaviour before the
+    destination rule existed.
+    """
     if _DENY_MCP.match(tool_name):
         return Risk.DENY
 
     if tool_name == "Bash":
         command = str(tool_input.get("command", ""))
         if any(pat.search(command) for pat in _BASH_RISK):
+            return Risk.RISKY
+        if _fetch_is_risky(command, fetch_allowed_hosts):
             return Risk.RISKY
         return Risk.SAFE
 

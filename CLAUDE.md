@@ -134,6 +134,10 @@ default_headers={"anthropic-beta": "oauth-2025-04-20"})` or the API returns 401.
 - Fix lint with `uv run ruff check --fix src tests` and `uv run ruff format src tests`.
 - **Small, frequent commits** — one per plan task, using the plan's commit message.
 - Do NOT add AI co-author trailers to commits in this repo.
+- **Never commit, merge or push anything naming the company or its internal systems** —
+  not in code, comments, tests, docs or commit messages. Use generic placeholders
+  (`example-org`, `*.internal.example`); the real values live in gitignored `jean.json` /
+  `soul.md` and in Vault.
 
 ### One feature at a time, in its own worktree
 

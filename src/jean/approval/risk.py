@@ -107,8 +107,7 @@ _SECRETS = re.compile(
 )
 _EXTERNAL = re.compile(
     r"""
-    \bcurl\b | \bwget\b
-    | \bscp\b
+    \bscp\b
     | \brsync\b.*(?:@[\w.-]+:|::)
     | \bgh\s+pr\s+create\b
     | \b(npm|pip|cargo|gem)\s+publish\b
@@ -165,14 +164,79 @@ _MCP_RISK = re.compile(
 )
 
 
-def classify_risk(tool_name: str, tool_input: dict[str, Any]) -> Risk:
-    """Deterministic risk of a tool call. Pure; reads structured args only."""
+# --- fetch (curl/wget): judged by DESTINATION, not by the word -------------
+#
+# `\bcurl\b` used to sit in _EXTERNAL, so every curl asked -- including
+# `curl -s -o /dev/null -w "%{http_code}" https://api.github.com`, a connectivity
+# probe that discards its own output. But curl is also the one command in the
+# agent's shell that can move data OUT: that shell can read JEAN_DATABASE_URL,
+# the Slack bot token, the Grafana and Elasticsearch tokens, the GitHub token and
+# the mounted kubernetes service-account token. The pod is disposable; those are
+# not. So the rule is not "allow curl" or "gate curl" but "where is it going":
+#
+#   - a host the deployment has configured (JEAN_FETCH_ALLOWED_HOSTS) -> expected
+#   - anything else -> a random URL, ask
+#   - sending data (-d/-X POST/-T/-F) -> ask WHEREVER it goes, because a
+#     configured host is not a licence to push data to it (a GitHub gist is a URL
+#     anyone can read)
+#   - a host jean cannot determine (`curl $TARGET`) -> ask; reading the variable
+#     NAME would be trivially defeated
+#
+# Empty allowlist -- the default -- gates every fetch, so this cannot silently
+# open anything for a deployment that has not named its hosts.
+_FETCH_CMD = re.compile(r"\b(?:curl|wget)\b", re.IGNORECASE)
+_FETCH_SENDS_DATA = re.compile(
+    r"""
+    \s-d\b | \s--data(?:-\w+)?\b        # -d / --data / --data-binary / --data-raw
+    | \s-T\b | \s--upload-file\b
+    | \s-F\b | \s--form\b
+    | \s--post\d*\b                     # wget --post-data / --post-file
+    | \s-X\s*(?:POST|PUT|PATCH|DELETE)\b
+    | \s--request\s*(?:POST|PUT|PATCH|DELETE)\b
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+_URL_RE = re.compile(r"\bhttps?://([^\s/?#'\"]+)", re.IGNORECASE)
+
+
+def _fetch_is_risky(command: str, allowed_hosts: frozenset[str]) -> bool:
+    """True when a curl/wget in `command` deserves a human.
+
+    Host comparison is exact on the hostname (port stripped), never a substring:
+    `api.github.com.evil.tld` and `raw.api.github.com` must not inherit
+    `api.github.com`'s trust.
+    """
+    if not _FETCH_CMD.search(command):
+        return False
+    if _FETCH_SENDS_DATA.search(command):
+        return True
+    urls = _URL_RE.findall(command)
+    if not urls:
+        return True  # nothing to verify -- interpolated, or no URL at all
+    return any(u.rsplit("@", 1)[-1].split(":", 1)[0].lower() not in allowed_hosts for u in urls)
+
+
+def classify_risk(
+    tool_name: str,
+    tool_input: dict[str, Any],
+    *,
+    fetch_allowed_hosts: frozenset[str] = frozenset(),
+) -> Risk:
+    """Deterministic risk of a tool call. Pure; reads structured args only.
+
+    `fetch_allowed_hosts` is passed in rather than read from Settings so this stays
+    a pure function -- server.py derives it once and agent_options threads it here.
+    Empty (the default) means every curl/wget asks, i.e. the behaviour before the
+    destination rule existed.
+    """
     if _DENY_MCP.match(tool_name):
         return Risk.DENY
 
     if tool_name == "Bash":
         command = str(tool_input.get("command", ""))
         if any(pat.search(command) for pat in _BASH_RISK):
+            return Risk.RISKY
+        if _fetch_is_risky(command, fetch_allowed_hosts):
             return Risk.RISKY
         return Risk.SAFE
 

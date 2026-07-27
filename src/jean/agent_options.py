@@ -40,7 +40,13 @@ class _Gate(Protocol):
     async def request(self, channel: str, thread_ts: str, summary: str) -> ApprovalDecision: ...
 
 
-def build_can_use_tool(gate: _Gate, *, channel: str, thread_ts: str) -> CanUseTool:
+def build_can_use_tool(
+    gate: _Gate,
+    *,
+    channel: str,
+    thread_ts: str,
+    fetch_hosts: frozenset[str] = frozenset(),
+) -> CanUseTool:
     """The SDK's permission hook. A deterministic classifier decides risk; only
     RISKY calls reach a human.
 
@@ -61,7 +67,7 @@ def build_can_use_tool(gate: _Gate, *, channel: str, thread_ts: str) -> CanUseTo
     async def can_use_tool(
         tool_name: str, tool_input: dict[str, Any], context: Any
     ) -> PermissionResultAllow | PermissionResultDeny:
-        risk = classify_risk(tool_name, tool_input)
+        risk = classify_risk(tool_name, tool_input, fetch_allowed_hosts=fetch_hosts)
         if risk is Risk.SAFE:
             return PermissionResultAllow()
         if risk is Risk.DENY:

@@ -24,7 +24,7 @@ def _risk(command: str) -> Risk:
         "ls ~/Work/ 2>/dev/null || ls /home/ 2>/dev/null",
         "kubectl get pods 2>/dev/null",
         "grep -r foo . 2>/dev/null",
-        "curl -s example.com >/dev/null 2>&1",  # EXTERNAL still applies, see below
+        "curl -s example.com >/dev/null 2>&1",
         "make build > /dev/null",
         "echo hi > /dev/stdout",
         "echo oops > /dev/stderr",
@@ -43,10 +43,11 @@ def test_silencing_stderr_does_not_make_a_read_only_command_risky():
     assert _risk("kubectl get pods -n devops 2>/dev/null") is Risk.SAFE
 
 
-def test_curl_stays_risky_for_its_own_reason():
-    """The redirect is harmless; reaching the network is not. This guards against
-    a fix that loosens more than the redirect."""
-    assert _risk("curl -s https://example.com >/dev/null 2>&1") is Risk.RISKY
+def test_a_redirect_does_not_change_what_a_fetch_is_judged_on():
+    """The redirect is harmless either way; the METHOD decides. This guards against
+    a fix to the /dev/ pattern that loosens or tightens more than the redirect."""
+    assert _risk("curl -s https://example.com >/dev/null 2>&1") is Risk.SAFE
+    assert _risk("curl -X POST https://example.com >/dev/null 2>&1") is Risk.RISKY
 
 
 # --- what the pattern was actually for -------------------------------------

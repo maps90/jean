@@ -157,7 +157,7 @@ class GitMarketplaceResolver:
         """The dir handed to the CLI as `--plugin-dir` for this entry.
 
         Marketplaces disagree on layout, so the manifest decides rather than a
-        hardcoded path: the marketplace says `source: "./plugins/<name>"` and ships
+        hardcoded path: some marketplaces say `source: "./plugins/<name>"` and ship
         a `plugin.json` in each, anthropics/skills says `source: "./"` for
         every plugin and ships none. Only the second case needs an overlay
         (see plugins/overlay.py); anything already carrying its own manifest is

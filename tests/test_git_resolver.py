@@ -48,9 +48,7 @@ async def test_resolve_returns_local_paths(tmp_path):
 async def test_token_never_in_cache_path(tmp_path):
     runner, _ = _make_fake_runner(["grafana"])
     r = GitMarketplaceResolver(token="ghp_secret", cache_dir=tmp_path, runner=runner)
-    out = await r.resolve(
-        [PluginRef("git@github.com:example-org/skills.git", "grafana", "main")]
-    )
+    out = await r.resolve([PluginRef("git@github.com:example-org/skills.git", "grafana", "main")])
     assert "ghp_secret" not in out[0].path
 
 
@@ -152,7 +150,7 @@ async def test_source_pointing_at_repo_root_resolves_to_an_overlay(tmp_path):
 
 
 async def test_plugin_with_its_own_manifest_is_used_verbatim(tmp_path):
-    """the marketplace ships a real plugin.json per plugin -- never overlay those."""
+    """A marketplace may ship a real plugin.json per plugin -- never overlay those."""
 
     async def runner(args: list[str], cwd: Path) -> None:
         if args[0] != "clone":
@@ -169,9 +167,7 @@ async def test_plugin_with_its_own_manifest_is_used_verbatim(tmp_path):
         (pdir / "plugin.json").write_text(json.dumps({"name": "kubectl"}))
 
     r = GitMarketplaceResolver(token=None, cache_dir=tmp_path, runner=runner)
-    out = await r.resolve(
-        [PluginRef("git@github.com:example-org/skills.git", "kubectl", "main")]
-    )
+    out = await r.resolve([PluginRef("git@github.com:example-org/skills.git", "kubectl", "main")])
     assert Path(out[0].path).name == "kubectl"
     assert Path(out[0].path).parent.name == "plugins"
 

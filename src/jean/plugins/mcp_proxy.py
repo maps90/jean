@@ -37,7 +37,7 @@ def build_proxy_servers(clients: list[McpClient]) -> dict[str, Any]:
     The key is what names the tool the agent calls (`mcp__<key>__<tool>`), so it
     is chosen to be byte-identical to the name the CLI used when it spawned the
     server itself -- `plugin_kubectl_kubernetes` for a plugin's server. Anything
-    that already refers to these tools (an the marketplace skill's allowed-tools, a
+    that already refers to these tools (a plugin skill's allowed-tools, a
     prompt naming `mcp__plugin_kubectl_kubernetes__pods_list`) keeps working.
     """
     servers: dict[str, Any] = {}

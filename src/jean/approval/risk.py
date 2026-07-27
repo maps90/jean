@@ -4,6 +4,8 @@ import enum
 import re
 from typing import Any
 
+from jean.approval.blocked_terms import CONTENT_FIELDS, bash_publishes, find_blocked
+
 
 class Risk(enum.Enum):
     """A tool call's risk, decided by code -- never by the model.
@@ -165,9 +167,53 @@ _MCP_RISK = re.compile(
 )
 
 
-def classify_risk(tool_name: str, tool_input: dict[str, Any]) -> Risk:
-    """Deterministic risk of a tool call. Pure; reads structured args only."""
+def _authors_blocked_term(
+    tool_name: str, tool_input: dict[str, Any], terms: frozenset[str]
+) -> bool:
+    """Would this call put a blocked term somewhere it outlives the turn?
+
+    Bash is judged on the command text, and only when the command publishes or
+    authors -- `grep -ri <term> .` is how an operator AUDITS for the term, and
+    denying that would make the rule impossible to verify.
+
+    Every other tool is judged on the fields that carry content jean is about to
+    write. The file PATH is deliberately not checked: editing a badly-named file
+    is how you clean it up.
+    """
+    if tool_name == "Bash":
+        command = str(tool_input.get("command", ""))
+        return bash_publishes(command) and find_blocked(command, terms) is not None
+
+    for field in CONTENT_FIELDS:
+        value = tool_input.get(field)
+        if isinstance(value, str) and find_blocked(value, terms):
+            return True
+    # MultiEdit carries its replacements one level down.
+    edits = tool_input.get("edits")
+    if isinstance(edits, list):
+        return any(
+            isinstance(e, dict) and find_blocked(str(e.get("new_string", "")), terms) for e in edits
+        )
+    return False
+
+
+def classify_risk(
+    tool_name: str,
+    tool_input: dict[str, Any],
+    *,
+    blocked_terms: frozenset[str] = frozenset(),
+) -> Risk:
+    """Deterministic risk of a tool call. Pure; reads structured args only.
+
+    `blocked_terms` defaults to empty, so a deployment that configures none keeps
+    every verdict it had before.
+    """
     if _DENY_MCP.match(tool_name):
+        return Risk.DENY
+
+    # Checked before the RISKY rules on purpose: a blocked term must not become a
+    # button an approver can click the leak through.
+    if blocked_terms and _authors_blocked_term(tool_name, tool_input, blocked_terms):
         return Risk.DENY
 
     if tool_name == "Bash":

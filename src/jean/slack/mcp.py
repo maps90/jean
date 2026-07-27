@@ -4,6 +4,7 @@ from typing import Any
 
 from claude_agent_sdk import SdkMcpTool, create_sdk_mcp_server, tool
 
+from jean.approval.blocked_terms import find_blocked, refusal
 from jean.approval.gate import ApprovalGate
 from jean.ports import ChatSurface
 
@@ -26,6 +27,7 @@ def build_slack_mcp(
     *,
     channel: str,
     thread_ts: str,
+    blocked_terms: frozenset[str] = frozenset(),
 ) -> tuple[Any, list[str], list[SdkMcpTool]]:
     """Build the in-process `jean_slack` MCP server for ONE Slack thread.
 
@@ -42,15 +44,40 @@ def build_slack_mcp(
     etc.) so it is testable by calling `<tool>.handler(args)` directly, without
     going through the SDK wrapper (see tests/test_slack_mcp.py)."""
 
+    def _blocked(*texts: str | None) -> dict[str, Any] | None:
+        """The last checkpoint before words leave the process.
+
+        This is where the rule has to live to be a rule at all: these tools are in
+        `allowed_tools`, so the SDK never routes them through `can_use_tool` and the
+        risk classifier never sees them. Returning `is_error` rather than raising
+        keeps it a normal tool failure the agent can read and retry from.
+        """
+        for text in texts:
+            term = find_blocked(text or "", blocked_terms)
+            if term:
+                return {"content": [{"type": "text", "text": refusal(term)}], "is_error": True}
+        return None
+
     async def _reply(args: dict[str, Any]) -> dict[str, Any]:
+        if stop := _blocked(args["text"]):
+            return stop
         ts = await chat.reply(channel, thread_ts, args["text"])
         return {"content": [{"type": "text", "text": f"posted (ts={ts})"}]}
 
     async def _edit(args: dict[str, Any]) -> dict[str, Any]:
+        if stop := _blocked(args["text"]):
+            return stop
         await chat.edit(channel, args["ts"], args["text"])
         return {"content": [{"type": "text", "text": "edited"}]}
 
     async def _upload(args: dict[str, Any]) -> dict[str, Any]:
+        # `path` is not checked: it names a local file, and a file jean authored
+        # could not have contained a blocked term (the classifier denies writing
+        # one). Its NAME is not published to the thread -- `filename` is.
+        if stop := _blocked(
+            args["filename"], args.get("title"), args.get("comment"), args.get("content")
+        ):
+            return stop
         await chat.upload(
             channel,
             thread_ts,
@@ -71,6 +98,10 @@ def build_slack_mcp(
         return {"content": [{"type": "text", "text": "unreacted"}]}
 
     async def _request_approval(args: dict[str, Any]) -> dict[str, Any]:
+        # The summary is posted to the thread verbatim, so it is a post like any
+        # other -- and a blocked term is not something an approver may wave through.
+        if stop := _blocked(args["summary"]):
+            return stop
         decision = await gate.request(channel, thread_ts, args["summary"])
         verb = "approved" if decision.approved else "denied"
         return {"content": [{"type": "text", "text": f"{verb} by {decision.by}"}]}

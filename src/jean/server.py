@@ -148,6 +148,19 @@ async def run() -> None:
             "'- <#CHANNELID>' entries to restrict it."
         )
 
+    # Same reasoning for the blocked-term rule: it is off by default, and an
+    # operator who set JEAN_BLOCKED_TERMS needs to see that it took, not discover
+    # from a leak that a typo left it empty. The terms themselves are logged
+    # because they are not secrets -- they are words jean must refuse to say.
+    if settings.blocked_term_set:
+        logger.info(
+            "blocked terms ACTIVE: %d term(s) refused in outbound text and authored files: %s",
+            len(settings.blocked_term_set),
+            ", ".join(sorted(settings.blocked_term_set)),
+        )
+    else:
+        logger.info("blocked terms INACTIVE: JEAN_BLOCKED_TERMS is unset, so no term is refused")
+
     app = AsyncApp(token=settings.slack_bot_token)
     auth = await app.client.auth_test()
     bot_id = auth["user_id"]
@@ -238,9 +251,16 @@ async def run() -> None:
         # its approval request -- into the wrong thread. The channel/thread are
         # known here, so close over them. A per-session Slack server is cheap:
         # in-process closures, not a child process.
-        can_use_tool = build_can_use_tool(gate, channel=channel, thread_ts=thread_ts)
+        # The blocked-term rule is enforced in BOTH places because they see
+        # different traffic: the classifier never sees jean's own Slack tools (they
+        # are in allowed_tools, so the CLI skips the permission hook), and the Slack
+        # tools never see a Bash command or a file write.
+        blocked = settings.blocked_term_set
+        can_use_tool = build_can_use_tool(
+            gate, channel=channel, thread_ts=thread_ts, blocked_terms=blocked
+        )
         slack_server, slack_tool_names, _tools = build_slack_mcp(
-            chat, gate, channel=channel, thread_ts=thread_ts
+            chat, gate, channel=channel, thread_ts=thread_ts, blocked_terms=blocked
         )
 
         def options_factory(resume: str | None, permission_mode: str | None) -> ClaudeAgentOptions:

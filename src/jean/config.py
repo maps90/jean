@@ -66,6 +66,12 @@ class Settings(BaseSettings):
     # "plan" makes the agent present a plan first; "bypassPermissions" skips the
     # hook entirely, leaving only the agent-chosen request_approval tool.
     permission_mode: str = "default"
+    # Words that must never appear in anything jean sends or writes. A HARD rule,
+    # not an approval: enforced in code on the way out (slack/mcp.py) and in the
+    # risk classifier (approval/risk.py), because a system-prompt directive is a
+    # request the model can rationalise past. Empty = off, and off is the default,
+    # so this cannot change behaviour for a deployment that has not set it.
+    blocked_terms: str = ""
     health_port: int = 8080
     model: str | None = None
     # How hard the model works per turn. Unset = let the CLI pick its own default
@@ -198,3 +204,14 @@ class Settings(BaseSettings):
     @property
     def cache_dir(self) -> Path:
         return self.home / "cache"
+
+    @property
+    def blocked_term_set(self) -> frozenset[str]:
+        """`JEAN_BLOCKED_TERMS="Acme, WidgetCo"` -> {"acme", "widgetco"}.
+
+        Lower-cased here so the matcher can compare against a lower-cased haystack
+        without re-folding per call, and blanks dropped so a trailing comma cannot
+        contribute an empty term -- which would match every string and deny
+        everything.
+        """
+        return frozenset(t.strip().lower() for t in self.blocked_terms.split(",") if t.strip())

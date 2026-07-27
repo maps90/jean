@@ -176,27 +176,62 @@ _MCP_RISK = re.compile(
 #
 #   - a host the deployment has configured (JEAN_FETCH_ALLOWED_HOSTS) -> expected
 #   - anything else -> a random URL, ask
-#   - sending data (-d/-X POST/-T/-F) -> ask WHEREVER it goes, because a
-#     configured host is not a licence to push data to it (a GitHub gist is a URL
-#     anyone can read)
 #   - a host jean cannot determine (`curl $TARGET`) -> ask; reading the variable
 #     NAME would be trivially defeated
+#
+# On a configured host the HTTP METHOD decides, because the methods differ in what
+# they can do to something that already exists:
+#
+#   - GET/HEAD/OPTIONS read, and POST creates something new (a query, a search
+#     body, a webhook, an annotation) -> no click. Requiring one made ordinary
+#     work -- POSTing an Elasticsearch query is a GET with a body -- unusable.
+#   - PUT/PATCH/DELETE replace, edit or destroy a resource that is already there.
+#     That is the same class of act as any other mutation jean asks about, and it
+#     is not undone by the pod being disposable: the damage is on the far side.
+#
+# An unrecognised explicit method asks. There is no list of "safe" verbs to fall
+# back on, and a method jean does not model is one it cannot reason about.
 #
 # Empty allowlist -- the default -- gates every fetch, so this cannot silently
 # open anything for a deployment that has not named its hosts.
 _FETCH_CMD = re.compile(r"\b(?:curl|wget)\b", re.IGNORECASE)
-_FETCH_SENDS_DATA = re.compile(
+# Read-or-create. Anything outside this set asks, so the gap is fail-closed.
+_FETCH_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "POST"})
+_EXPLICIT_METHOD = re.compile(
+    r"""(?:\s-X\s*|\s--request[\s=]*|\s--method[\s=]*)   # curl -X/--request, wget --method
+        ([A-Za-z]+)""",
+    re.IGNORECASE | re.VERBOSE,
+)
+# Flags that imply a method when none is given explicitly. -T/--upload-file is
+# curl's PUT; the body flags are its POST.
+_IMPLIES_PUT = re.compile(r"\s-T\b | \s--upload-file\b", re.IGNORECASE | re.VERBOSE)
+_IMPLIES_POST = re.compile(
     r"""
     \s-d\b | \s--data(?:-\w+)?\b        # -d / --data / --data-binary / --data-raw
-    | \s-T\b | \s--upload-file\b
+    | \s--json\b
     | \s-F\b | \s--form\b
-    | \s--post\d*\b                     # wget --post-data / --post-file
-    | \s-X\s*(?:POST|PUT|PATCH|DELETE)\b
-    | \s--request\s*(?:POST|PUT|PATCH|DELETE)\b
+    | \s--post-(?:data|file)\b          # wget
     """,
     re.IGNORECASE | re.VERBOSE,
 )
 _URL_RE = re.compile(r"\bhttps?://([^\s/?#'\"]+)", re.IGNORECASE)
+
+
+def _fetch_methods(command: str) -> set[str]:
+    """Every HTTP method this command could use, upper-cased.
+
+    A compound command may hold several fetches (`curl A && curl -X DELETE B`),
+    and the classifier judges the whole string -- so collect all of them and let
+    the caller require every one to be acceptable.
+    """
+    explicit = {m.upper() for m in _EXPLICIT_METHOD.findall(command)}
+    if explicit:
+        return explicit
+    if _IMPLIES_PUT.search(command):
+        return {"PUT"}
+    if _IMPLIES_POST.search(command):
+        return {"POST"}
+    return {"GET"}
 
 
 def _fetch_is_risky(command: str, allowed_hosts: frozenset[str]) -> bool:
@@ -208,7 +243,7 @@ def _fetch_is_risky(command: str, allowed_hosts: frozenset[str]) -> bool:
     """
     if not _FETCH_CMD.search(command):
         return False
-    if _FETCH_SENDS_DATA.search(command):
+    if not _FETCH_SAFE_METHODS.issuperset(_fetch_methods(command)):
         return True
     urls = _URL_RE.findall(command)
     if not urls:

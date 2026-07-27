@@ -157,9 +157,33 @@ _WEB_TOOLS = {"WebFetch", "WebSearch"}
 
 # --- MCP tool ids whose verb is a mutation worth a human. `(?<!un)cordon`
 #     matches `cordon`/`nodes_cordon` but not `uncordon`/`nodes_uncordon`. ---
+#
+# This list is the ONLY thing standing between a plugin's write tool and an
+# unattended production change: plugin MCP tools are deliberately kept out of
+# `allowed_tools` so every call reaches here, and a verb that is missing means
+# the call is auto-allowed in silence. A gap is therefore not a missing prompt,
+# it is a missing boundary -- which is exactly how it was found. Adding an Argo
+# CD server surfaced three tools that changed production and never asked:
+#
+#   sync_application     -- a sync IS the deploy
+#   run_resource_action  -- how `restart` (and any other Lua action) is invoked
+#   update_application   -- `update` was never in this list at all, so retargeting
+#                           an app's revision was silent too
+#
+# So the additions are the whole class, not just the three: things that make
+# something happen elsewhere (`trigger`, `run_<x>_action`), things that move a
+# release (`rollback`, `promote`, `abort`), and things that stop or restart
+# reconciliation (`sync`, `(?<!un)suspend`, `resume`). Better to over-ask on a
+# read whose name sounds like a verb than to under-ask on a deploy.
+#
+# `run_\w*_action` rather than a bare `action`: `get_resource_actions` LISTS the
+# actions available on a resource, which is how the agent discovers `restart`
+# before asking to run it. Gating the lookup would mean needing approval merely
+# to find out what could be asked for.
 _MCP_RISK = re.compile(
     r"(delete|apply|rollout|scale|restart|drain|(?<!un)cordon|destroy|create|patch"
-    r"|evict|replace|remove|terminate)",
+    r"|evict|replace|remove|terminate|update|sync|run_\w*_action|trigger"
+    r"|rollback|promote|abort|(?<!un)suspend|resume)",
     re.IGNORECASE,
 )
 

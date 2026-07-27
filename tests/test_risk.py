@@ -35,7 +35,7 @@ def test_secret_bash_is_risky(command):
 
 @pytest.mark.parametrize(
     "command",
-    ["curl https://api.example.com", "wget http://x/y", "gh pr create", "npm publish"],
+    ["gh pr create", "npm publish", "scp f u@h:/p", "sendmail -t < m"],
 )
 def test_external_bash_is_risky(command):
     assert classify_risk("Bash", {"command": command}) is Risk.RISKY
@@ -226,8 +226,11 @@ def test_ls_var_mail_is_safe():
     assert classify_risk("Bash", {"command": "ls /var/mail/"}) is Risk.SAFE
 
 
-def test_curl_stays_risky():
-    assert classify_risk("Bash", {"command": "curl https://x"}) is Risk.RISKY
+def test_curl_is_judged_by_method_not_by_the_word():
+    """curl left _EXTERNAL: reading changes nothing, so a GET runs. A write still
+    asks, wherever it points. See tests/test_risk_fetch.py for the full rule."""
+    assert classify_risk("Bash", {"command": "curl https://x"}) is Risk.SAFE
+    assert classify_risk("Bash", {"command": "curl -X DELETE https://x"}) is Risk.RISKY
 
 
 def test_scp_still_risky_after_narrowing():

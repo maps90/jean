@@ -243,9 +243,7 @@ async def run() -> None:
         # its approval request -- into the wrong thread. The channel/thread are
         # known here, so close over them. A per-session Slack server is cheap:
         # in-process closures, not a child process.
-        can_use_tool = build_can_use_tool(
-            gate, channel=channel, thread_ts=thread_ts, fetch_hosts=settings.fetch_hosts
-        )
+        can_use_tool = build_can_use_tool(gate, channel=channel, thread_ts=thread_ts)
         slack_server, slack_tool_names, _tools = build_slack_mcp(
             chat, gate, channel=channel, thread_ts=thread_ts
         )

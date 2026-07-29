@@ -98,6 +98,11 @@ class Settings(BaseSettings):
     # Refuse to archive a pathological transcript rather than let one thread bloat
     # the database. Such a thread keeps working, but only on the worker holding it.
     transcript_max_mb: int = 32
+    # How often a worker looks for due schedules, and how late a firing may be and
+    # still run. A summary forty minutes late is fine; two days late carries a
+    # "weekly" framing that is no longer true, so it is recorded as missed instead.
+    schedule_poll_seconds: float = 30.0
+    schedule_grace_seconds: float = 3600.0
 
     # The CLI writes a turn to its .jsonl write-behind, so jean waits for the file to
     # settle before archiving it (JeanSession._settle). All three are seconds.

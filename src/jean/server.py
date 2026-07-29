@@ -28,6 +28,8 @@ from jean.plugins.mcp_client import start_clients
 from jean.plugins.mcp_config import remote_servers, stdio_servers, take_over_plugin_mcp
 from jean.plugins.mcp_proxy import build_proxy_servers
 from jean.ports import ChatSurface, MaintenanceStore, SessionStore, TranscriptStore
+from jean.schedule.mcp import build_schedule_mcp
+from jean.schedule.runner import ScheduleRunner
 from jean.session.manager import SessionManager
 from jean.session.session import JeanSession
 from jean.session.transcript import LocalTranscripts
@@ -247,6 +249,12 @@ async def run() -> None:
         slack_server, slack_tool_names, _tools = build_slack_mcp(
             chat, gate, channel=channel, thread_ts=thread_ts
         )
+        # Bound per session for the same reason as the Slack server: a schedule
+        # must be created in the thread that asked for it, and a shared routing
+        # slot would let a slow turn on one thread write into another.
+        schedule_server, schedule_tool_names, _sched_tools = build_schedule_mcp(
+            store, gate, channel=channel, thread_ts=thread_ts
+        )
 
         def options_factory(resume: str | None, permission_mode: str | None) -> ClaudeAgentOptions:
             return build_agent_options(
@@ -254,6 +262,8 @@ async def run() -> None:
                 agent_name=soul_provider().identity.name,
                 slack_server=slack_server,
                 slack_tool_names=slack_tool_names,
+                schedule_server=schedule_server,
+                schedule_tool_names=schedule_tool_names,
                 mcp_servers=mcp_servers,
                 plugins=plugins,
                 settings=settings,
@@ -298,6 +308,16 @@ async def run() -> None:
     if settings.cleanup_enabled:
         scheduler = build_cleanup_scheduler(store, settings)
         tasks.append(scheduler.run())
+
+    # Named schedule_runner, not runner: `runner` is already the aiohttp web
+    # runner and the finally block below calls runner.cleanup().
+    schedule_runner = ScheduleRunner(
+        store,
+        manager.handle,
+        grace_seconds=settings.schedule_grace_seconds,
+        poll_seconds=settings.schedule_poll_seconds,
+    )
+    tasks.append(schedule_runner.run())
 
     try:
         await asyncio.gather(*tasks)

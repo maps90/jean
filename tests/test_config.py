@@ -160,3 +160,9 @@ def test_db_schema_rejects_non_identifier(clean_env, bad):
     clean_env.setenv("JEAN_DB_SCHEMA", bad)
     with pytest.raises(ValueError):
         Settings.load()
+
+
+def test_schedule_settings_have_defaults(clean_env):
+    settings = Settings.load()
+    assert settings.schedule_poll_seconds == 30.0
+    assert settings.schedule_grace_seconds == 3600.0

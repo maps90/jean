@@ -162,6 +162,41 @@ async def test_a_reaction_alone_does_not_count_as_speaking(tmp_path):
     assert [t for _, _, t in chat.replies] == ["the answer"]
 
 
+async def test_an_approval_card_does_not_count_as_speaking(tmp_path):
+    """Reported in production: the agent asked for approval to file Jira tickets, the
+    human approved, the tickets were created -- and the thread never heard about it.
+
+    request_approval posts a Block Kit card, but that card is a QUESTION asked
+    mid-turn, not the answer. The approved work always happens after it, in the same
+    turn, so counting it as having spoken suppressed the one message that said what
+    got done. Unlike reply/edit/upload, it is never the agent choosing to speak."""
+    chat = FakeChat()
+    stream = [
+        AssistantMessage([ToolUseBlock(name="mcp__jean_slack__request_approval")]),
+        AssistantMessage([ToolUseBlock(name="mcp__plugin_jira__createJiraIssue")]),
+        AssistantMessage([TextBlock("Filed SRE-41 plus 3 stories under it.")]),
+        FakeResultMessage(session_id="s1"),
+    ]
+    await _session(chat, stream, tmp_path).run_turn("file those tickets")
+
+    assert [t for _, _, t in chat.replies] == ["Filed SRE-41 plus 3 stories under it."]
+
+
+async def test_an_approval_followed_by_a_reply_still_does_not_double_post(tmp_path):
+    """The other half of the same rule: if the agent DID speak for itself after the
+    approval, delivery must stay out of the way exactly as before."""
+    chat = FakeChat()
+    stream = [
+        AssistantMessage([ToolUseBlock(name="mcp__jean_slack__request_approval")]),
+        AssistantMessage([ToolUseBlock(name="mcp__jean_slack__reply")]),
+        AssistantMessage([TextBlock("some private scratch text")]),
+        FakeResultMessage(session_id="s1"),
+    ]
+    await _session(chat, stream, tmp_path).run_turn("file those tickets")
+
+    assert chat.replies == []
+
+
 async def test_only_the_final_text_is_posted_not_the_running_narration(tmp_path):
     """Mid-turn text is the model thinking out loud between tool calls. Posting all
     of it would dump the working thread on the user; the last message is the answer."""

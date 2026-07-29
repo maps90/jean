@@ -27,17 +27,24 @@ logger = logging.getLogger(__name__)
 # back to a conservative quiet-only wait instead of trusting target == baseline.
 ASSISTANT_MESSAGE_CLASS_NAME = "AssistantMessage"
 
-# The `jean_slack` tools that put something a human can READ into the thread. A turn
-# that called one of them has already spoken, so `_deliver` stays out of the way and
-# the final message is not sent as well. react/unreact are deliberately absent: an
-# emoji acknowledges, it never answers. request_approval counts because it posts a
-# Block Kit message.
+# The `jean_slack` tools by which the agent CHOOSES to say its answer. A turn that
+# called one of them has already spoken, so `_deliver` stays out of the way and the
+# final message is not sent as well.
+#
+# react/unreact are deliberately absent: an emoji acknowledges, it never answers.
+#
+# request_approval is absent for a subtler reason. It does post a Block Kit card, and
+# it was once listed here on that basis -- but the card is a QUESTION asked mid-turn,
+# and the approved work necessarily happens after it, in the same turn. Because
+# `spoke` latches for the rest of the turn, listing it suppressed the message that
+# said what the approved work actually did: reported in production as an agent that
+# filed a set of Jira tickets after an explicit approval and then never mentioned
+# them, leaving the approver to go and look. A question is not an answer.
 SPEAKING_TOOLS = frozenset(
     {
         "mcp__jean_slack__reply",
         "mcp__jean_slack__edit",
         "mcp__jean_slack__upload",
-        "mcp__jean_slack__request_approval",
     }
 )
 

@@ -17,6 +17,7 @@ from tests.store_behavior import (
     assert_save_requires_an_existing_session,
     assert_schedule_claim_advances_and_is_exclusive,
     assert_schedule_crud,
+    assert_schedule_reads_are_snapshots,
     assert_schedule_record_run,
     assert_session_roundtrip,
     assert_thread_lock_allows_different_threads,
@@ -110,3 +111,7 @@ async def test_schedule_claim_advances_and_is_exclusive(store):
 
 async def test_schedule_record_run(store):
     await assert_schedule_record_run(store)
+
+
+async def test_schedule_reads_are_snapshots(store):
+    await assert_schedule_reads_are_snapshots(store)

@@ -247,11 +247,17 @@ class MemoryStore:
             next_run_at=next_run_at,
         )
         self._schedules[row.id] = row
-        return row
+        return replace(row)
 
     async def list_schedules(self, channel: str, thread_ts: str) -> list[Schedule]:
+        # Copies, like get_session: Postgres necessarily builds a fresh object per
+        # read, so handing back a live reference here would make the two adapters
+        # behave differently -- and would let a caller corrupt the store by
+        # assigning to a field it was only reading.
         return [
-            s for s in self._schedules.values() if s.channel == channel and s.thread_ts == thread_ts
+            replace(s)
+            for s in self._schedules.values()
+            if s.channel == channel and s.thread_ts == thread_ts
         ]
 
     async def delete_schedule(self, schedule_id: str, channel: str, thread_ts: str) -> bool:

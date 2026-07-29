@@ -378,3 +378,42 @@ async def assert_schedule_record_run(store) -> None:
     row = (await store.list_schedules("C1", "111.222"))[0]
     assert row.last_run_at == 1234.0
     assert row.last_status == "ok"
+
+
+async def assert_schedule_reads_are_snapshots(store) -> None:
+    """A returned Schedule must not alias the store's own row.
+
+    MemoryStore is the only adapter that *could* hand back a live reference --
+    Postgres builds a fresh object per read -- and that difference would make the
+    two behave differently under the same calls. It also lets a caller corrupt
+    the store by assigning to a field it was only reading.
+    """
+    made = await store.create_schedule(
+        channel="C1",
+        thread_ts="111.222",
+        cron="0 9 * * 2",
+        timezone="UTC",
+        prompt="p",
+        created_by="U1",
+        next_run_at=1000.0,
+    )
+
+    # What create returned is a snapshot too.
+    made.prompt = "tampered at creation"
+    assert (await store.list_schedules("C1", "111.222"))[0].prompt == "p"
+
+    mine = (await store.list_schedules("C1", "111.222"))[0]
+    mine.next_run_at = 999999.0
+    mine.prompt = "tampered"
+
+    fresh = (await store.list_schedules("C1", "111.222"))[0]
+    assert fresh.next_run_at == 1000.0
+    assert fresh.prompt == "p"
+
+    # The claim path must snapshot too: the runner reads next_run_at off the
+    # returned row AFTER the store has advanced it.
+    claimed = (await store.claim_due_schedules(1000.0, lambda s: 2000.0))[0]
+    assert claimed.id == made.id
+    assert claimed.next_run_at == 1000.0
+    assert (await store.list_schedules("C1", "111.222"))[0].next_run_at == 2000.0
+    assert claimed.next_run_at == 1000.0  # unchanged by the store's write

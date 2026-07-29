@@ -24,8 +24,8 @@ A schedule is a stored prompt, a cron expression, and a thread. When it comes du
 a worker injects the prompt as an ordinary turn in that thread. The agent answers
 as it would to a human, and its reply lands in the thread as a reply.
 
-Creating or removing a schedule requires human approval. Schedules can be paused
-and resumed without losing them.
+A schedule either exists or it does not. Creating and removing both require human
+approval.
 
 ## Decisions
 
@@ -76,13 +76,12 @@ CREATE TABLE IF NOT EXISTS schedules (
   timezone     TEXT NOT NULL,
   prompt       TEXT NOT NULL,
   created_by   TEXT NOT NULL,
-  enabled      BOOLEAN NOT NULL DEFAULT TRUE,
   next_run_at  TIMESTAMPTZ NOT NULL,
   last_run_at  TIMESTAMPTZ,
   last_status  TEXT,
   created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-CREATE INDEX IF NOT EXISTS schedules_due ON schedules (next_run_at) WHERE enabled;
+CREATE INDEX IF NOT EXISTS schedules_due ON schedules (next_run_at);
 ```
 
 `last_status` is one of `ok`, `missed`, `error`. It is the only record of a firing
@@ -100,7 +99,7 @@ and loses only history.
 
 | File | Responsibility |
 |---|---|
-| `ports.py` | `ScheduleStore` protocol: `create`, `list_for_thread`, `set_enabled`, `delete`, `claim_due` |
+| `ports.py` | `ScheduleStore` protocol: `create`, `list_for_thread`, `delete`, `claim_due` |
 | `db/postgres.py` | asyncpg adapter |
 | `db/memory.py` | in-memory fake implementing the same protocol |
 | `schedule/cron.py` | `next_after(cron, tz, after) -> datetime`, and validation. Pure. |
@@ -118,15 +117,18 @@ testable with no store, no clock and no I/O.
 |---|---|---|
 | `create(cron, timezone, prompt)` | required | channel and thread bound at build time |
 | `list()` | no | schedules for the current thread only |
-| `pause(id)` / `resume(id)` | no | `set_enabled`; creates no new autonomous behaviour |
 | `remove(id)` | required | deletes the row |
 
-`list`, `pause` and `resume` are ungated because none of them cause the agent to
-act on its own: pausing only reduces what it does, and resuming restores a
-schedule a human already approved. `create` and `remove` are gated because one
-starts autonomous behaviour and the other destroys a record of it.
+There is no pause. A paused schedule is a third state that has to be represented
+in the table, excluded from every due query, surfaced in `list`, and reasoned
+about whenever a firing misbehaves — in exchange for saving someone the retyping
+of one cron expression. Stopping is removing; starting again is creating again,
+and creating already asks a human.
 
-All five operate only on schedules belonging to the calling thread. An id from
+`list` is ungated because reading changes nothing. `create` and `remove` are gated
+because one starts autonomous behaviour and the other destroys a record of it.
+
+All three operate only on schedules belonging to the calling thread. An id from
 another thread is treated as not found, so one thread cannot enumerate or cancel
 another's schedules.
 
@@ -153,7 +155,7 @@ approve a schedule that cannot run.
 ```
 runner ticks every JEAN_SCHEDULE_POLL_SECONDS
   -> claim_due(now):
-       SELECT ... WHERE enabled AND next_run_at <= now
+       SELECT ... WHERE next_run_at <= now
        FOR UPDATE SKIP LOCKED
        advance next_run_at in the SAME transaction
   -> now - due > grace ?  -> log, last_status='missed', skip
@@ -199,7 +201,7 @@ malformed expression. No fakes required.
 
 `ScheduleRunner`: fake `ScheduleStore`, injected clock, fake session manager that
 records calls. Fires when due; marks `missed` past the grace window; advances
-`next_run_at`; never claims a disabled row; survives an exception mid-loop.
+`next_run_at`; claims nothing when nothing is due; survives an exception mid-loop.
 
 `schedule/mcp.py`: fake approval gate and fake store. The case that matters most is
 **denied leaves nothing written**. Also: an invalid cron raises no approval at all,

@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import time
+import uuid
+from collections.abc import Callable
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
-from jean.ports import ApprovalDecision, PruneResult, SessionRow
+from jean.ports import ApprovalDecision, PruneResult, Schedule, SessionRow
 
 
 @dataclass
@@ -35,6 +37,7 @@ class MemoryStore:
         self._locks: dict[tuple[str, str], asyncio.Lock] = {}
         self._approvals: dict[str, _ApprovalRow] = {}
         self._transcripts: dict[tuple[str, str], tuple[str, bytes]] = {}
+        self._schedules: dict[str, Schedule] = {}
         self._last_cleanup: float | None = None
 
     # ---- SessionStore ----
@@ -220,3 +223,61 @@ class MemoryStore:
             return False
         self._last_cleanup = now
         return True
+
+    # ---- ScheduleStore ----
+    async def create_schedule(
+        self,
+        *,
+        channel: str,
+        thread_ts: str,
+        cron: str,
+        timezone: str,
+        prompt: str,
+        created_by: str,
+        next_run_at: float,
+    ) -> Schedule:
+        row = Schedule(
+            id=uuid.uuid4().hex,
+            channel=channel,
+            thread_ts=thread_ts,
+            cron=cron,
+            timezone=timezone,
+            prompt=prompt,
+            created_by=created_by,
+            next_run_at=next_run_at,
+        )
+        self._schedules[row.id] = row
+        return row
+
+    async def list_schedules(self, channel: str, thread_ts: str) -> list[Schedule]:
+        return [
+            s for s in self._schedules.values() if s.channel == channel and s.thread_ts == thread_ts
+        ]
+
+    async def delete_schedule(self, schedule_id: str, channel: str, thread_ts: str) -> bool:
+        row = self._schedules.get(schedule_id)
+        # Thread-scoped on purpose: an id from another thread is "not found", so
+        # one thread cannot cancel another's schedules.
+        if row is None or row.channel != channel or row.thread_ts != thread_ts:
+            return False
+        del self._schedules[schedule_id]
+        return True
+
+    async def claim_due_schedules(
+        self, now: float, advance: Callable[[Schedule], float]
+    ) -> list[Schedule]:
+        claimed: list[Schedule] = []
+        for row in self._schedules.values():
+            if row.next_run_at > now:
+                continue
+            due = replace(row)  # snapshot carrying the DUE time
+            row.next_run_at = advance(row)
+            claimed.append(due)
+        return claimed
+
+    async def record_run(self, schedule_id: str, *, last_run_at: float, last_status: str) -> None:
+        row = self._schedules.get(schedule_id)
+        if row is None:
+            return
+        row.last_run_at = last_run_at
+        row.last_status = last_status

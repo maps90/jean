@@ -12,6 +12,7 @@ dependencies = [
     "pydantic>=2.6",
     "pydantic-settings>=2.3",
     "PyYAML>=6.0",
+    "croniter>=2.0",
 ]
 
 [project.scripts]

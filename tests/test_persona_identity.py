@@ -27,6 +27,29 @@ def test_compose_system_prompt_contains_persona_and_baseline():
             break
 
 
+def test_baseline_requires_creating_artifacts_somewhere_the_reader_can_reach():
+    """Reported in production: the agent created a Google Doc, posted the URL, and the
+    requester got "you need access" -- the doc was owned by the agent's own identity and
+    nobody else could open it.
+
+    The rule is create-it-shared, NOT grant-access-after: jean never tells the agent who
+    it is talking to (`author_id` is used for engagement in gateway/app.py and dropped
+    before dispatch), and there is no Slack-id-to-email lookup on ChatSurface, so an
+    instruction to share with the requester names someone the agent cannot identify.
+    Creating in a pre-configured shared location needs no identity at all.
+
+    The fallback is half the rule: an agent that cannot place it somewhere readable must
+    say so and deliver the content anyway, not post a link it cannot vouch for."""
+    # Flattened: the template is hard-wrapped, so a phrase the reader sees as one
+    # sentence may straddle a newline. Asserting on the raw text would pin the wrap
+    # rather than the wording, and rewrapping a paragraph would fail the test.
+    composed = " ".join(compose_system_prompt("persona").split())
+    assert "shared location" in composed
+    assert "not in a space only you can reach" in composed
+    assert "could not make it readable" in composed
+    assert "mcp__jean_slack__upload" in composed
+
+
 def test_compose_system_prompt_names_the_agent():
     """The persona's name -- not the project's -- is who the agent is told it is."""
     composed = compose_system_prompt("Name: Anya", name="Anya")

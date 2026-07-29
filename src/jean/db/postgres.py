@@ -2,11 +2,34 @@ from __future__ import annotations
 
 import asyncio
 import gzip
+import uuid
+from collections.abc import Callable
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 
 import asyncpg
 
-from jean.ports import ApprovalDecision, PruneResult, SessionRow
+from jean.ports import ApprovalDecision, PruneResult, Schedule, SessionRow
+
+
+def _epoch(value: datetime | None) -> float | None:
+    return None if value is None else value.timestamp()
+
+
+def _row_to_schedule(r: asyncpg.Record) -> Schedule:
+    return Schedule(
+        id=r["id"],
+        channel=r["channel"],
+        thread_ts=r["thread_ts"],
+        cron=r["cron"],
+        timezone=r["timezone"],
+        prompt=r["prompt"],
+        created_by=r["created_by"],
+        next_run_at=r["next_run_at"].timestamp(),
+        last_run_at=_epoch(r["last_run_at"]),
+        last_status=r["last_status"],
+    )
+
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (
@@ -51,6 +74,23 @@ ALTER TABLE sessions ADD COLUMN IF NOT EXISTS engaged_with text;
 -- code's INSERT (which omits it) succeeds on the default. Drop it in a later
 -- release, once no pod running the old image can exist.
 ALTER TABLE transcripts ALTER COLUMN data SET STORAGE EXTERNAL;
+-- No FK to sessions, deliberately: retention prunes sessions after a few days
+-- and a weekly schedule must outlive that. A cascade here would delete
+-- schedules during routine cleanup, which would read as them vanishing at
+-- random weeks after anyone touched them.
+CREATE TABLE IF NOT EXISTS schedules (
+  id           text PRIMARY KEY,
+  channel      text NOT NULL,
+  thread_ts    text NOT NULL,
+  cron         text NOT NULL,
+  timezone     text NOT NULL,
+  prompt       text NOT NULL,
+  created_by   text NOT NULL,
+  next_run_at  timestamptz NOT NULL,
+  last_run_at  timestamptz,
+  last_status  text,
+  created_at   timestamptz NOT NULL DEFAULT now());
+CREATE INDEX IF NOT EXISTS schedules_due ON schedules (next_run_at);
 """
 
 
@@ -376,3 +416,84 @@ class PostgresStore:
                 "UPDATE maintenance SET last_run=extract(epoch from now()) WHERE job='cleanup'"
             )
             return True
+
+    # ---- ScheduleStore ----
+    async def create_schedule(
+        self,
+        *,
+        channel: str,
+        thread_ts: str,
+        cron: str,
+        timezone: str,
+        prompt: str,
+        created_by: str,
+        next_run_at: float,
+    ) -> Schedule:
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """INSERT INTO schedules
+                     (id, channel, thread_ts, cron, timezone, prompt, created_by, next_run_at)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                   RETURNING *""",
+                uuid.uuid4().hex,
+                channel,
+                thread_ts,
+                cron,
+                timezone,
+                prompt,
+                created_by,
+                datetime.fromtimestamp(next_run_at, UTC),
+            )
+        return _row_to_schedule(row)
+
+    async def list_schedules(self, channel: str, thread_ts: str) -> list[Schedule]:
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT * FROM schedules WHERE channel = $1 AND thread_ts = $2 ORDER BY created_at",
+                channel,
+                thread_ts,
+            )
+        return [_row_to_schedule(r) for r in rows]
+
+    async def delete_schedule(self, schedule_id: str, channel: str, thread_ts: str) -> bool:
+        async with self._pool.acquire() as conn:
+            result = await conn.execute(
+                "DELETE FROM schedules WHERE id = $1 AND channel = $2 AND thread_ts = $3",
+                schedule_id,
+                channel,
+                thread_ts,
+            )
+        return result != "DELETE 0"
+
+    async def claim_due_schedules(
+        self, now: float, advance: Callable[[Schedule], float]
+    ) -> list[Schedule]:
+        claimed: list[Schedule] = []
+        async with self._pool.acquire() as conn, conn.transaction():
+            # SKIP LOCKED, not a global claim gate: schedules are independent, so
+            # workers share the load and two of them cannot take the same row.
+            rows = await conn.fetch(
+                "SELECT * FROM schedules WHERE next_run_at <= $1 FOR UPDATE SKIP LOCKED",
+                datetime.fromtimestamp(now, UTC),
+            )
+            for r in rows:
+                due = _row_to_schedule(r)
+                # Advance inside this transaction, before the turn runs: a worker
+                # that dies mid-turn loses one firing rather than re-firing on
+                # every restart.
+                await conn.execute(
+                    "UPDATE schedules SET next_run_at = $2 WHERE id = $1",
+                    due.id,
+                    datetime.fromtimestamp(advance(due), UTC),
+                )
+                claimed.append(due)
+        return claimed
+
+    async def record_run(self, schedule_id: str, *, last_run_at: float, last_status: str) -> None:
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE schedules SET last_run_at = $2, last_status = $3 WHERE id = $1",
+                schedule_id,
+                datetime.fromtimestamp(last_run_at, UTC),
+                last_status,
+            )

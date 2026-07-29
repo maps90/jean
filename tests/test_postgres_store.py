@@ -23,6 +23,9 @@ from tests.store_behavior import (  # noqa: E402
     assert_prune_removes_resolved_approvals_and_stale_sessions,
     assert_prune_uses_separate_windows_and_drops_transcripts,
     assert_save_requires_an_existing_session,
+    assert_schedule_claim_advances_and_is_exclusive,
+    assert_schedule_crud,
+    assert_schedule_record_run,
     assert_session_roundtrip,
     assert_thread_lock_allows_different_threads,
     assert_thread_lock_serializes_same_thread,
@@ -37,7 +40,7 @@ async def store():
     dsn = os.environ["JEAN_TEST_DATABASE_URL"]
     s = await PostgresStore.connect(dsn)
     async with s._pool.acquire() as c:
-        await c.execute("TRUNCATE transcripts, sessions, approvals, maintenance")
+        await c.execute("TRUNCATE transcripts, sessions, approvals, maintenance, schedules")
     yield s
     await s.close()
 
@@ -221,3 +224,15 @@ async def test_schemas_isolate_agents_in_one_database():
             await cleanup.execute('DROP SCHEMA IF EXISTS "damian_test" CASCADE')
         finally:
             await cleanup.close()
+
+
+async def test_schedule_crud(store):
+    await assert_schedule_crud(store)
+
+
+async def test_schedule_claim_advances_and_is_exclusive(store):
+    await assert_schedule_claim_advances_and_is_exclusive(store)
+
+
+async def test_schedule_record_run(store):
+    await assert_schedule_record_run(store)

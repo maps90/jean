@@ -114,3 +114,40 @@ def test_cli_stderr_is_routed_to_the_logger(monkeypatch, caplog):
         opts.stderr("No conversation found with session ID: abc\n")
 
     assert "No conversation found with session ID: abc" in caplog.text
+
+
+def test_schedule_server_and_tools_are_registered(monkeypatch):
+    """The schedule tools are jean's own surface, so they belong in
+    allowed_tools alongside the Slack ones -- not left to can_use_tool, which
+    exists to gate PLUGIN mutations. Their own approval happens inside the tool."""
+    opts = build_agent_options(
+        persona_text="I am jean.",
+        slack_server={"_": "slack"},
+        slack_tool_names=["mcp__jean_slack__reply"],
+        schedule_server={"_": "schedule"},
+        schedule_tool_names=["mcp__jean_schedule__create"],
+        mcp_servers={},
+        plugins=[],
+        settings=_settings(monkeypatch),
+        can_use_tool=_allow,
+        resume=None,
+    )
+    assert opts.mcp_servers["jean_schedule"] == {"_": "schedule"}
+    assert "mcp__jean_schedule__create" in opts.allowed_tools
+    assert "mcp__jean_slack__reply" in opts.allowed_tools
+
+
+def test_schedule_server_is_optional(monkeypatch):
+    """Omitting it must not put a None into mcp_servers -- the CLI would try to
+    start it."""
+    opts = build_agent_options(
+        persona_text="I am jean.",
+        slack_server={"_": "slack"},
+        slack_tool_names=["mcp__jean_slack__reply"],
+        mcp_servers={},
+        plugins=[],
+        settings=_settings(monkeypatch),
+        can_use_tool=_allow,
+        resume=None,
+    )
+    assert "jean_schedule" not in opts.mcp_servers

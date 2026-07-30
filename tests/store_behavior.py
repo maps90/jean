@@ -305,3 +305,115 @@ async def _backdate_session(store, channel: str, thread_ts: str, when: float) ->
             thread_ts,
             when,
         )
+
+
+async def assert_schedule_crud(store) -> None:
+    channel, thread_ts = "C1", "111.222"
+    assert await store.list_schedules(channel, thread_ts) == []
+
+    made = await store.create_schedule(
+        channel=channel,
+        thread_ts=thread_ts,
+        cron="0 9 * * 2",
+        timezone="Asia/Jakarta",
+        prompt="post the weekly sprint summary",
+        created_by="U1",
+        next_run_at=1000.0,
+    )
+    assert made.id
+    assert made.cron == "0 9 * * 2"
+    assert made.next_run_at == 1000.0
+    assert made.last_status is None
+
+    rows = await store.list_schedules(channel, thread_ts)
+    assert [r.id for r in rows] == [made.id]
+
+    # Scoped to the thread: another thread sees nothing.
+    assert await store.list_schedules(channel, "999.999") == []
+
+    # And cannot delete it either.
+    assert await store.delete_schedule(made.id, channel, "999.999") is False
+    assert await store.delete_schedule(made.id, channel, thread_ts) is True
+    assert await store.delete_schedule(made.id, channel, thread_ts) is False
+    assert await store.list_schedules(channel, thread_ts) == []
+
+
+async def assert_schedule_claim_advances_and_is_exclusive(store) -> None:
+    made = await store.create_schedule(
+        channel="C1",
+        thread_ts="111.222",
+        cron="0 9 * * 2",
+        timezone="UTC",
+        prompt="p",
+        created_by="U1",
+        next_run_at=1000.0,
+    )
+
+    # Nothing due yet.
+    assert await store.claim_due_schedules(999.0, lambda s: 2000.0) == []
+
+    claimed = await store.claim_due_schedules(1000.0, lambda s: 2000.0)
+    assert [c.id for c in claimed] == [made.id]
+    # The claimed row carries the DUE time, not the advanced one -- the runner
+    # needs the original to decide whether it is inside the grace window.
+    assert claimed[0].next_run_at == 1000.0
+
+    # Advanced in the same call, so a second claimer at the same instant sees
+    # nothing. This is what stops two workers firing one schedule.
+    assert await store.claim_due_schedules(1000.0, lambda s: 2000.0) == []
+    assert await store.claim_due_schedules(2000.0, lambda s: 3000.0) != []
+
+
+async def assert_schedule_record_run(store) -> None:
+    made = await store.create_schedule(
+        channel="C1",
+        thread_ts="111.222",
+        cron="0 9 * * 2",
+        timezone="UTC",
+        prompt="p",
+        created_by="U1",
+        next_run_at=1000.0,
+    )
+    await store.record_run(made.id, last_run_at=1234.0, last_status="ok")
+    row = (await store.list_schedules("C1", "111.222"))[0]
+    assert row.last_run_at == 1234.0
+    assert row.last_status == "ok"
+
+
+async def assert_schedule_reads_are_snapshots(store) -> None:
+    """A returned Schedule must not alias the store's own row.
+
+    MemoryStore is the only adapter that *could* hand back a live reference --
+    Postgres builds a fresh object per read -- and that difference would make the
+    two behave differently under the same calls. It also lets a caller corrupt
+    the store by assigning to a field it was only reading.
+    """
+    made = await store.create_schedule(
+        channel="C1",
+        thread_ts="111.222",
+        cron="0 9 * * 2",
+        timezone="UTC",
+        prompt="p",
+        created_by="U1",
+        next_run_at=1000.0,
+    )
+
+    # What create returned is a snapshot too.
+    made.prompt = "tampered at creation"
+    assert (await store.list_schedules("C1", "111.222"))[0].prompt == "p"
+
+    mine = (await store.list_schedules("C1", "111.222"))[0]
+    mine.next_run_at = 999999.0
+    mine.prompt = "tampered"
+
+    fresh = (await store.list_schedules("C1", "111.222"))[0]
+    assert fresh.next_run_at == 1000.0
+    assert fresh.prompt == "p"
+
+    # The claim path must snapshot too: the runner reads next_run_at off the
+    # returned row AFTER the store has advanced it.
+    claimed = (await store.claim_due_schedules(1000.0, lambda s: 2000.0))[0]
+    assert claimed.id == made.id
+    assert claimed.next_run_at == 1000.0
+    assert (await store.list_schedules("C1", "111.222"))[0].next_run_at == 2000.0
+    assert claimed.next_run_at == 1000.0  # unchanged by the store's write

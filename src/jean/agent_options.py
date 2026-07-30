@@ -113,6 +113,8 @@ def build_agent_options(
     slack_server: Any,
     slack_tool_names: list[str],
     mcp_servers: dict[str, Any],
+    schedule_server: Any = None,
+    schedule_tool_names: list[str] | None = None,
     plugins: list[ResolvedPlugin],
     settings: Settings,
     resume: str | None,
@@ -125,17 +127,24 @@ def build_agent_options(
     CLI fork its own copy of that server for every session, which is what the
     proxy exists to prevent.
 
-    `allowed_tools` carries ONLY jean's own Slack surface tools. Plugin MCP tools
-    are deliberately left out: putting `mcp__<server>__*` wildcards here would
-    have the CLI auto-allow every proxied tool -- including mutations like
-    `mcp__plugin_kubectl_kubernetes__pods_delete` -- without ever calling
-    `can_use_tool`, bypassing the risk classifier entirely. Leaving them out
-    routes every plugin MCP call through `can_use_tool`, where `classify_risk`
-    decides."""
+    `allowed_tools` carries ONLY jean's own tools -- the Slack surface and, when
+    wired, the schedule tools. Plugin MCP tools are deliberately left out: putting
+    `mcp__<server>__*` wildcards here would have the CLI auto-allow every proxied
+    tool -- including mutations like `mcp__plugin_kubectl_kubernetes__pods_delete`
+    -- without ever calling `can_use_tool`, bypassing the risk classifier
+    entirely. Leaving them out routes every plugin MCP call through
+    `can_use_tool`, where `classify_risk` decides.
+
+    The schedule tools are safe to allow-list because they carry their own gate:
+    create and remove call the ApprovalGate inside the tool, so allowing them here
+    lets the agent reach them without also letting it act unapproved."""
+    jean_servers: dict[str, Any] = {"jean_slack": slack_server}
+    if schedule_server is not None:
+        jean_servers["jean_schedule"] = schedule_server
     return ClaudeAgentOptions(
         system_prompt=compose_system_prompt(persona_text, name=agent_name),
-        mcp_servers={"jean_slack": slack_server, **mcp_servers},
-        allowed_tools=[*slack_tool_names],
+        mcp_servers={**jean_servers, **mcp_servers},
+        allowed_tools=[*slack_tool_names, *(schedule_tool_names or [])],
         plugins=[{"type": "local", "path": p.path} for p in plugins],
         skills="all",
         strict_mcp_config=False,

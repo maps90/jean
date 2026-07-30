@@ -15,6 +15,10 @@ from tests.store_behavior import (
     assert_prune_removes_resolved_approvals_and_stale_sessions,
     assert_prune_uses_separate_windows_and_drops_transcripts,
     assert_save_requires_an_existing_session,
+    assert_schedule_claim_advances_and_is_exclusive,
+    assert_schedule_crud,
+    assert_schedule_reads_are_snapshots,
+    assert_schedule_record_run,
     assert_session_roundtrip,
     assert_thread_lock_allows_different_threads,
     assert_thread_lock_serializes_same_thread,
@@ -95,3 +99,19 @@ async def test_bump_turn_on_a_new_thread_is_not_born_expired(store):
 
 async def test_save_requires_an_existing_session(store):
     await assert_save_requires_an_existing_session(store)
+
+
+async def test_schedule_crud(store):
+    await assert_schedule_crud(store)
+
+
+async def test_schedule_claim_advances_and_is_exclusive(store):
+    await assert_schedule_claim_advances_and_is_exclusive(store)
+
+
+async def test_schedule_record_run(store):
+    await assert_schedule_record_run(store)
+
+
+async def test_schedule_reads_are_snapshots(store):
+    await assert_schedule_reads_are_snapshots(store)

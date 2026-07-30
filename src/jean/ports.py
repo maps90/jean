@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
@@ -27,6 +28,22 @@ class ApprovalDecision:
 class PruneResult:
     approvals_deleted: int
     sessions_deleted: int
+
+
+@dataclass
+class Schedule:
+    id: str
+    channel: str
+    thread_ts: str
+    cron: str
+    timezone: str
+    prompt: str
+    created_by: str
+    # Epoch seconds, like SessionRow.last_active_at. Postgres stores TIMESTAMPTZ
+    # and the adapter converts; the domain never handles a datetime.
+    next_run_at: float
+    last_run_at: float | None = None
+    last_status: str | None = None
 
 
 @dataclass
@@ -138,3 +155,39 @@ class ChatSurface(Protocol):
     async def react(self, channel: str, ts: str, emoji: str) -> None: ...
     async def unreact(self, channel: str, ts: str, emoji: str) -> None: ...
     async def set_status(self, channel: str, thread_ts: str, status: str) -> None: ...
+
+
+@runtime_checkable
+class ScheduleStore(Protocol):
+    """Recurring prompts, keyed to the thread that owns them.
+
+    `claim_due_schedules` takes an `advance` callback because next_run_at must
+    move inside the SAME transaction as the claim -- otherwise a crash between
+    claiming and advancing re-fires the schedule on every restart -- and the next
+    value is cron math the store cannot do. The callback is pure, so the adapter
+    stays testable.
+    """
+
+    async def create_schedule(
+        self,
+        *,
+        channel: str,
+        thread_ts: str,
+        cron: str,
+        timezone: str,
+        prompt: str,
+        created_by: str,
+        next_run_at: float,
+    ) -> Schedule: ...
+
+    async def list_schedules(self, channel: str, thread_ts: str) -> list[Schedule]: ...
+
+    async def delete_schedule(self, schedule_id: str, channel: str, thread_ts: str) -> bool: ...
+
+    async def claim_due_schedules(
+        self, now: float, advance: Callable[[Schedule], float]
+    ) -> list[Schedule]: ...
+
+    async def record_run(
+        self, schedule_id: str, *, last_run_at: float, last_status: str
+    ) -> None: ...

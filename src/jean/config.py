@@ -67,6 +67,13 @@ class Settings(BaseSettings):
     # hook entirely, leaving only the agent-chosen request_approval tool.
     permission_mode: str = "default"
     health_port: int = 8080
+    # The `agent` label on every exported metric. Defaults to db_schema, which is
+    # already the per-agent discriminator in a shared database (see above), so a
+    # multi-agent deployment gets correct labels with no extra config. Set this
+    # explicitly on a single-agent install, where db_schema is the useless
+    # "public". Prometheus also attaches job/pod labels of its own; this one makes
+    # a dashboard portable across scrape configs.
+    metrics_agent: str | None = None
     model: str | None = None
     # How hard the model works per turn. Unset = let the CLI pick its own default
     # (`xhigh`), which is what every deployment ran before this existed. This is

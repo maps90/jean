@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 
 @dataclass
@@ -190,4 +190,43 @@ class ScheduleStore(Protocol):
 
     async def record_run(
         self, schedule_id: str, *, last_run_at: float, last_status: str
+    ) -> None: ...
+
+
+@runtime_checkable
+class MetricsSink(Protocol):
+    """Per-turn cost and health counters, for the Prometheus scrape.
+
+    Every method is a plain `def`, not `async def` -- the one deliberate
+    departure from "async everywhere on I/O paths". A counter increment is an
+    in-memory update, not I/O, and `run_turn` emits its turn metric from a
+    `finally` block: an await there is a cancellation point, and a cancelled
+    bookkeeping call could mask the exception being propagated. Metrics must
+    never be able to fail, block, or reorder a turn.
+
+    The `agent` label is NOT a parameter here. Domain code does not know which
+    deployment it is; the adapter owns that label (see metrics/prometheus.py).
+
+    `trigger` is "human" | "schedule". `outcome` on a turn is one of
+    "ok" | "notice" | "undelivered" | "error" | "rate_limited" -- see
+    docs/superpowers/specs/2026-07-30-prometheus-metrics-design.md for what
+    each means and the precedence between them.
+    """
+
+    def turn_done(self, *, trigger: str, outcome: str, seconds: float) -> None: ...
+
+    def tokens(
+        self, *, trigger: str, usage: dict[str, Any] | None, cost_usd: float | None
+    ) -> None: ...
+
+    def session_started(self) -> None: ...
+
+    def session_resumed(self, *, outcome: str) -> None: ...  # "ok" | "fresh_fallback"
+
+    def transcript_incomplete(self) -> None: ...
+
+    def schedule_run(self, *, status: str) -> None: ...  # "ok" | "error" | "missed"
+
+    def rate_limit(
+        self, *, window: str, utilization: float | None, resets_at: float | None
     ) -> None: ...

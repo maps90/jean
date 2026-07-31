@@ -77,3 +77,28 @@ def test_access_log_reports_failures(caplog):
     assert len(caplog.records) == 2
     assert "503" in caplog.text
     assert "/healthz" in caplog.text
+
+
+async def test_metrics_route_serves_the_exposition():
+    from jean.metrics.prometheus import PrometheusMetrics
+
+    metrics = PrometheusMetrics(agent="anya")
+    metrics.turn_done(trigger="human", outcome="ok", seconds=1.0)
+    app = make_health_app(ready_check=lambda: _ready(True), render_metrics=metrics.render)
+
+    async with TestClient(TestServer(app)) as client:
+        resp = await client.get("/metrics")
+        assert resp.status == 200
+        assert "text/plain" in resp.headers["Content-Type"]
+        body = await resp.text()
+        # prometheus_client emits labels in alphabetical order.
+        assert 'jean_turns_total{agent="anya",outcome="ok",trigger="human"} 1.0' in body
+
+
+async def test_metrics_route_absent_when_no_renderer_is_wired():
+    """A run with metrics unwired must 404 rather than serve an empty page that
+    a scrape would happily report as a healthy zero."""
+    app = make_health_app(ready_check=lambda: _ready(True))
+    async with TestClient(TestServer(app)) as client:
+        resp = await client.get("/metrics")
+        assert resp.status == 404

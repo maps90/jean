@@ -19,6 +19,7 @@ from jean.db.postgres import PostgresStore
 from jean.gateway.app import Gateway, register
 from jean.health import ErrorOnlyAccessLogger, make_health_app
 from jean.maintenance.cleanup import CleanupScheduler
+from jean.metrics.prometheus import PrometheusMetrics
 from jean.persona.extract import load_soul_data
 from jean.persona.identity import load_identity
 from jean.persona.model import SoulData
@@ -27,7 +28,13 @@ from jean.plugins.manifest import load_mcp_config, load_plugin_manifest
 from jean.plugins.mcp_client import start_clients
 from jean.plugins.mcp_config import remote_servers, stdio_servers, take_over_plugin_mcp
 from jean.plugins.mcp_proxy import build_proxy_servers
-from jean.ports import ChatSurface, MaintenanceStore, SessionStore, TranscriptStore
+from jean.ports import (
+    ChatSurface,
+    MaintenanceStore,
+    MetricsSink,
+    SessionStore,
+    TranscriptStore,
+)
 from jean.schedule.mcp import build_schedule_mcp
 from jean.schedule.runner import ScheduleRunner
 from jean.session.manager import SessionManager
@@ -77,6 +84,7 @@ def build_session_factory(
     # can say "waiting on an approval" rather than "still working". Optional: a
     # caller without a gate gets the honest default of "nothing pending".
     approval_pending_for: Callable[[str, str], bool] = lambda _c, _t: False,
+    metrics: MetricsSink | None = None,
 ) -> Callable[[str, str], JeanSession]:
     """`store` is handed to JeanSession as both `store=` and `transcripts=`:
     PostgresStore satisfies SessionStore and TranscriptStore structurally, so
@@ -103,6 +111,7 @@ def build_session_factory(
             settle_quiet=settings.settle_quiet,
             slow_turn_seconds=settings.slow_turn_seconds,
             approval_pending=lambda: approval_pending_for(channel, thread_ts),
+            metrics=metrics,
         )
 
     return session_factory
@@ -198,7 +207,15 @@ async def run() -> None:
     )
     plugins = await resolver.resolve(load_plugin_manifest(settings.plugins_path))
 
-    health_app = make_health_app(ready_check=store.ping)
+    # One registry per worker, constructed here and injected -- never
+    # prometheus_client's module-level default (see metrics/prometheus.py).
+    # The `agent` label defaults to db_schema, which is already how two agents
+    # sharing one database tell their rows apart.
+    metrics = PrometheusMetrics(agent=settings.metrics_agent or settings.db_schema)
+
+    # /metrics rides on the health port: no extra Service, listener, or probe
+    # surface, and the scrape never touches Postgres.
+    health_app = make_health_app(ready_check=store.ping, render_metrics=metrics.render)
     # Probe traffic is constant and uninteresting; log only 4xx/5xx (see
     # ErrorOnlyAccessLogger) so it does not bury everything else.
     runner = web.AppRunner(health_app, access_log_class=ErrorOnlyAccessLogger)
@@ -283,6 +300,7 @@ async def run() -> None:
         client_factory=ClaudeSDKClient,
         local_transcripts=local_transcripts,
         approval_pending_for=gate.pending_for,
+        metrics=metrics,
     )
 
     manager = SessionManager(
@@ -316,6 +334,7 @@ async def run() -> None:
         manager.handle,
         grace_seconds=settings.schedule_grace_seconds,
         poll_seconds=settings.schedule_poll_seconds,
+        metrics=metrics,
     )
     tasks.append(schedule_runner.run())
 

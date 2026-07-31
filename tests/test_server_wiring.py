@@ -15,6 +15,7 @@ from jean import server
 from jean.agent_options import build_agent_options
 from jean.config import Settings
 from jean.maintenance.cleanup import CleanupScheduler
+from jean.metrics.null import NullMetrics
 from jean.ports import PruneResult
 from jean.session.session import JeanSession
 
@@ -197,3 +198,54 @@ async def test_build_cleanup_scheduler_uses_settings_retention_and_interval(tmp_
     # were renamed, hardcoded, or swapped with the other.
     sessions_cutoff, approvals_cutoff = store.prune_cutoffs[0]
     assert approvals_cutoff - sessions_cutoff == (5 * 86400) - (45 * 86400)
+
+
+def test_build_session_factory_passes_the_metrics_sink_through(tmp_path):
+    """A sink that reaches JeanSession is the whole point; wiring it into the
+    health app but not the turn would export a permanently-zero dashboard."""
+    from jean.metrics.prometheus import PrometheusMetrics
+
+    settings = _make_settings(tmp_path)
+    metrics = PrometheusMetrics(agent="anya")
+
+    session_factory = server.build_session_factory(
+        settings=settings,
+        store=FakeStore(),
+        chat=FakeChat(),
+        options_factory_for=lambda c, t: lambda resume, permission_mode: None,
+        client_factory=lambda **kwargs: None,
+        local_transcripts=server.build_local_transcripts(settings),
+        metrics=metrics,
+    )
+
+    assert session_factory("C1", "111.222")._metrics is metrics
+
+
+def test_session_factory_defaults_to_a_no_op_sink(tmp_path):
+    """Metrics are optional plumbing: a caller that wires none must still get a
+    working session, not a None that blows up on the first turn."""
+    settings = _make_settings(tmp_path)
+
+    session_factory = server.build_session_factory(
+        settings=settings,
+        store=FakeStore(),
+        chat=FakeChat(),
+        options_factory_for=lambda c, t: lambda resume, permission_mode: None,
+        client_factory=lambda **kwargs: None,
+        local_transcripts=server.build_local_transcripts(settings),
+    )
+    session = session_factory("C1", "111.222")
+
+    # Never None, and never the Prometheus adapter by accident.
+    assert isinstance(session._metrics, NullMetrics)
+
+
+def test_metrics_agent_label_falls_back_to_the_db_schema(tmp_path):
+    """Two agents share one database and differ only by JEAN_DB_SCHEMA, so that
+    is already the per-agent discriminator -- reusing it means a multi-agent
+    deployment gets correct labels without a second setting to keep in sync."""
+    settings = _make_settings(tmp_path, db_schema="damian")
+    assert (settings.metrics_agent or settings.db_schema) == "damian"
+
+    explicit = _make_settings(tmp_path, db_schema="public", metrics_agent="anya")
+    assert (explicit.metrics_agent or explicit.db_schema) == "anya"

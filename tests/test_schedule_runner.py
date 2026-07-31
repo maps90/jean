@@ -11,7 +11,9 @@ class FakeHandle:
         self.calls: list[tuple[str, str, str]] = []
         self._raises = raises
 
-    async def __call__(self, channel: str, thread_ts: str, text: str) -> None:
+    async def __call__(
+        self, channel: str, thread_ts: str, text: str, *, trigger: str = "human"
+    ) -> None:
         self.calls.append((channel, thread_ts, text))
         if self._raises:
             raise RuntimeError("turn blew up")
@@ -108,3 +110,79 @@ async def test_a_failing_turn_is_recorded_and_does_not_stop_the_others() -> None
 
     row = (await store.list_schedules("C1", "111.222"))[0]
     assert row.last_status == "error"
+
+
+class _CountingMetrics:
+    def __init__(self) -> None:
+        self.schedule: list[str] = []
+
+    def schedule_run(self, *, status: str) -> None:
+        self.schedule.append(status)
+
+
+async def test_runner_counts_each_firing_by_status():
+    """ok / error / missed each have a different remediation -- a broken prompt,
+    a broken agent, and a worker that was down through the window -- so the
+    dashboard has to tell them apart."""
+    store = MemoryStore()
+    metrics = _CountingMetrics()
+    await store.create_schedule(
+        channel="C1",
+        thread_ts="1.0",
+        cron="* * * * *",
+        timezone="UTC",
+        prompt="ok one",
+        created_by="U1",
+        next_run_at=100.0,
+    )
+    await store.create_schedule(
+        channel="C1",
+        thread_ts="2.0",
+        cron="* * * * *",
+        timezone="UTC",
+        prompt="boom",
+        created_by="U1",
+        next_run_at=100.0,
+    )
+    await store.create_schedule(
+        channel="C1",
+        thread_ts="3.0",
+        cron="* * * * *",
+        timezone="UTC",
+        prompt="late",
+        created_by="U1",
+        next_run_at=0.0,  # far outside the grace window
+    )
+
+    async def handle(channel, thread_ts, prompt, *, trigger="human"):
+        if prompt == "boom":
+            raise RuntimeError("turn failed")
+
+    runner = ScheduleRunner(store, handle, grace_seconds=60.0, clock=lambda: 100.0, metrics=metrics)
+    await runner.run_once()
+
+    assert sorted(metrics.schedule) == ["error", "missed", "ok"]
+
+
+async def test_runner_labels_its_turns_as_schedule_triggered():
+    """Token spend has to be attributable to cron rather than to people."""
+    store = MemoryStore()
+    seen: list[str] = []
+
+    await store.create_schedule(
+        channel="C1",
+        thread_ts="1.0",
+        cron="* * * * *",
+        timezone="UTC",
+        prompt="hello",
+        created_by="U1",
+        next_run_at=100.0,
+    )
+
+    async def handle(channel, thread_ts, prompt, *, trigger="human"):
+        seen.append(trigger)
+
+    runner = ScheduleRunner(store, handle, clock=lambda: 100.0)
+    await runner.run_once()
+
+    assert seen == ["schedule"]

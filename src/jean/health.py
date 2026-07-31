@@ -30,12 +30,25 @@ class ErrorOnlyAccessLogger(AbstractAccessLogger):
             )
 
 
-def make_health_app(*, ready_check: Callable[[], Awaitable[bool]]) -> web.Application:
+def make_health_app(
+    *,
+    ready_check: Callable[[], Awaitable[bool]],
+    render_metrics: Callable[[], tuple[bytes, str]] | None = None,
+) -> web.Application:
     """Liveness/readiness endpoints for the health-port server. `/healthz`
     always answers if the process is up and reports the running `version` so
     operators can confirm which build a replica is serving; `/readyz` runs
     `ready_check` (in server.py, `store.ping`) so orchestrators can hold traffic
-    until Postgres is reachable."""
+    until Postgres is reachable.
+
+    `render_metrics` (in server.py, `PrometheusMetrics.render`) adds `/metrics`
+    on the SAME port -- the scrape needs no Service, port, or listener of its
+    own. It returns `(body, content_type)`; it is synchronous because rendering
+    the exposition is an in-memory walk of the registry, and it never reads
+    Postgres (see the design doc's no-DB-reads-on-scrape rule). When it is not
+    supplied the route is not registered at all, so an unwired run 404s rather
+    than serving an empty body that a scrape would record as a healthy zero.
+    """
 
     async def healthz(_request: web.Request) -> web.Response:
         return web.json_response({"status": "ok", "version": __version__})
@@ -47,4 +60,12 @@ def make_health_app(*, ready_check: Callable[[], Awaitable[bool]]) -> web.Applic
     app = web.Application()
     app.router.add_get("/healthz", healthz)
     app.router.add_get("/readyz", readyz)
+
+    if render_metrics is not None:
+
+        async def metrics(_request: web.Request) -> web.Response:
+            body, content_type = render_metrics()
+            return web.Response(body=body, content_type=content_type.split(";")[0].strip())
+
+        app.router.add_get("/metrics", metrics)
     return app

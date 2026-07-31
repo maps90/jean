@@ -35,7 +35,9 @@ class FakeHandle:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str, str]] = []
 
-    async def __call__(self, channel: str, thread_ts: str, text: str) -> None:
+    async def __call__(
+        self, channel: str, thread_ts: str, text: str, *, trigger: str = "human"
+    ) -> None:
         self.calls.append((channel, thread_ts, text))
 
 

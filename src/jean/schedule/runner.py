@@ -5,12 +5,16 @@ import logging
 import time
 from collections.abc import Awaitable, Callable
 
-from jean.ports import Schedule, ScheduleStore
+from jean.metrics.null import NullMetrics
+from jean.ports import MetricsSink, Schedule, ScheduleStore
 from jean.schedule.cron import next_after
 
 logger = logging.getLogger("jean.schedule")
 
-Handle = Callable[[str, str, str], Awaitable[None]]
+# Keyword-only `trigger` so the turn can be attributed to cron rather than to a
+# person; it defaults in SessionManager.handle, so a caller that does not care
+# (every other one) is unchanged.
+Handle = Callable[..., Awaitable[None]]
 
 
 class ScheduleRunner:
@@ -31,12 +35,14 @@ class ScheduleRunner:
         grace_seconds: float = 3600.0,
         poll_seconds: float = 30.0,
         clock: Callable[[], float] = time.time,
+        metrics: MetricsSink | None = None,
     ) -> None:
         self._store = store
         self._handle = handle
         self._grace_seconds = grace_seconds
         self._poll_seconds = poll_seconds
         self._clock = clock
+        self._metrics = metrics or NullMetrics()
 
     def _advance(self, schedule: Schedule) -> float:
         return next_after(schedule.cron, schedule.timezone, schedule.next_run_at)
@@ -56,17 +62,22 @@ class ScheduleRunner:
                     self._grace_seconds,
                 )
                 await self._store.record_run(schedule.id, last_run_at=now, last_status="missed")
+                self._metrics.schedule_run(status="missed")
                 continue
             try:
-                await self._handle(schedule.channel, schedule.thread_ts, schedule.prompt)
+                await self._handle(
+                    schedule.channel, schedule.thread_ts, schedule.prompt, trigger="schedule"
+                )
             except Exception:
                 # One bad schedule must not stop the rest, nor kill the loop.
                 # next_run_at already advanced, so this retries at the next
                 # occurrence rather than immediately.
                 logger.exception("schedule %s failed", schedule.id)
                 await self._store.record_run(schedule.id, last_run_at=now, last_status="error")
+                self._metrics.schedule_run(status="error")
                 continue
             await self._store.record_run(schedule.id, last_run_at=now, last_status="ok")
+            self._metrics.schedule_run(status="ok")
             fired += 1
         return fired
 

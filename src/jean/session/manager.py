@@ -32,7 +32,13 @@ class SessionManager:
         self._cache: dict[tuple[str, str], Any] = {}
         self._last_touch: dict[tuple[str, str], float] = {}
 
-    async def handle(self, channel: str, thread_ts: str, text: str) -> None:
+    async def handle(
+        self, channel: str, thread_ts: str, text: str, *, trigger: str = "human"
+    ) -> None:
+        """`trigger` is passed through to the turn for metrics attribution --
+        "human" for a Slack message, "schedule" when ScheduleRunner fires one.
+        Keyword-only with a default so the gateway, which only ever handles
+        people, is untouched."""
         key = (channel, thread_ts)
         async with self._lock(channel, thread_ts):
             session = self._cache.get(key)
@@ -40,7 +46,7 @@ class SessionManager:
                 session = self._session_factory(channel, thread_ts)
                 self._cache[key] = session
             self._last_touch[key] = time.time()
-            await session.run_turn(text)
+            await session.run_turn(text, trigger=trigger)
             # Re-stamp AFTER the turn, not just before it: a turn that parked on a
             # human approval can run for longer than idle_seconds, and an entry-only
             # stamp would leave the session already idle the moment it finishes --

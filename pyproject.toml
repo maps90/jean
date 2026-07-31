@@ -13,6 +13,7 @@ dependencies = [
     "pydantic-settings>=2.3",
     "PyYAML>=6.0",
     "croniter>=2.0",
+    "prometheus-client>=0.20",
 ]
 
 [project.scripts]

@@ -9,7 +9,8 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from jean.ports import ChatSurface, SessionRow, SessionStore, TranscriptStore
+from jean.metrics.null import NullMetrics
+from jean.ports import ChatSurface, MetricsSink, SessionRow, SessionStore, TranscriptStore
 from jean.session.transcript import LocalTranscripts
 
 logger = logging.getLogger(__name__)
@@ -26,6 +27,24 @@ logger = logging.getLogger(__name__)
 # same failure: if a turn streams zero matches despite otherwise succeeding, it falls
 # back to a conservative quiet-only wait instead of trusting target == baseline.
 ASSISTANT_MESSAGE_CLASS_NAME = "AssistantMessage"
+
+# Two more SDK messages matched by name, for the same layering reason and with the
+# same soft-dependency risk -- tests/test_session_metrics.py pins both.
+#
+# ResultMessage ends every turn and carries what the turn cost (`usage`,
+# `total_cost_usd`) plus how it failed (`is_error`, `api_error_status`).
+# RateLimitEvent is emitted only when the CLI's rate-limit state changes, which on a
+# subscription token is the earliest warning that the window is about to run out.
+#
+# A rename here is less dangerous than the AssistantMessage one -- it costs
+# observability, not data -- so there is no runtime backstop, only the pinning test.
+RESULT_MESSAGE_CLASS_NAME = "ResultMessage"
+RATE_LIMIT_EVENT_CLASS_NAME = "RateLimitEvent"
+
+# HTTP statuses that mean "slow down", not "you sent something wrong". Only these
+# get the `rate_limited` outcome: filing a 400 under throttling would send an
+# operator looking for capacity they already have.
+RATE_LIMIT_STATUSES = frozenset({429, 529})
 
 # The `jean_slack` tools by which the agent CHOOSES to say its answer. A turn that
 # called one of them has already spoken, so `_deliver` stays out of the way and the
@@ -168,6 +187,9 @@ class JeanSession:
         # and a default of "nothing pending" keeps single-process and test wiring
         # working without claiming an approval that does not exist.
         approval_pending: Callable[[], bool] | None = None,
+        # Where per-turn cost and health counters go. Defaults to the no-op sink so
+        # tests and single-process runs wire nothing; server.py injects the real one.
+        metrics: MetricsSink | None = None,
     ) -> None:
         self._channel = channel
         self._thread_ts = thread_ts
@@ -183,6 +205,7 @@ class JeanSession:
         self._settle_quiet = settle_quiet
         self._slow_turn_seconds = slow_turn_seconds
         self._approval_pending = approval_pending or (lambda: False)
+        self._metrics = metrics or NullMetrics()
         self._client: Any | None = None
         # The permission mode the cached client was opened with; the SDK fixes
         # it at connect, so a later /mode only lands on a fresh client.
@@ -256,7 +279,12 @@ class JeanSession:
         self._seen_seq = row.turn_seq if row else 0
         if resume is None:
             self._live_sid = None  # a fresh session writes a .jsonl we cannot name yet
-            return await self._open(None, mode)
+            client = await self._open(None, mode)
+            # Counted only once the open SUCCEEDED: a failed connect started no
+            # conversation, and counting the attempt would inflate the new-session
+            # rate exactly during an auth outage, when it is least true.
+            self._metrics.session_started()
+            return client
 
         # ... unless OUR local file is the newer copy. `_archived is False` for
         # `_sid` means the store never took our last turn (a save() failed, or the
@@ -302,7 +330,15 @@ class JeanSession:
             # orphans it on this pod's disk forever.
             self._local.delete(resume)
             self._live_sid = None  # a fresh session: a new .jsonl under a new id
+            # Only NOW is this known to be memory loss. The bare `_open` above
+            # succeeded, so the failure really was about the resume id -- had it
+            # been bad auth or a bad --plugin-dir, that call would have raised too
+            # and propagated, and this line would never run. Recording the loss any
+            # earlier would put a permanent floor under the memory-fidelity SLI for
+            # the whole duration of an unrelated outage.
+            self._metrics.session_resumed(outcome="fresh_fallback")
         else:
+            self._metrics.session_resumed(outcome="ok")
             # The resumed transcript is the file this client appends to, so run_turn's
             # settle wait measures its growth against the records already in it.
             self._live_sid = resume
@@ -389,6 +425,7 @@ class JeanSession:
             if target_met and quiet >= quiet_needed:
                 return
             if loop.time() >= deadline:
+                self._metrics.transcript_incomplete()
                 logger.warning(
                     "transcript for %s/%s did not settle within %.1fs (%d assistant "
                     "records on disk, expected %d) -- archiving it anyway, but it may be "
@@ -448,8 +485,14 @@ class JeanSession:
                 "failed to archive transcript for %s/%s", self._channel, self._thread_ts
             )
 
-    async def _deliver(self, final_text: str | None) -> None:
+    async def _deliver(self, final_text: str | None) -> str:
         """Post the turn's final assistant message as the reply.
+
+        Returns the turn outcome it produced, for the metrics label: "ok" when a
+        real answer went out, "notice" when there was nothing to say and the
+        thread got MUTE_TURN_NOTICE instead, "undelivered" when the post itself
+        failed and the thread is silent. run_turn owns the label; this method is
+        simply the only place that knows which of the three happened.
 
         This is the NORMAL path, not a rescue. Models end a turn treating their
         final message as the answer -- that is the overwhelming prior, and it held
@@ -472,7 +515,9 @@ class JeanSession:
                 self._thread_ts,
             )
             text = MUTE_TURN_NOTICE
+            outcome = "notice"
         else:
+            outcome = "ok"
             logger.info(
                 "delivered the final assistant message for %s/%s (%d chars)",
                 self._channel,
@@ -502,6 +547,10 @@ class JeanSession:
                 self._channel,
                 self._thread_ts,
             )
+            # Beats "notice": if even the notice failed to post, the thread has
+            # nothing in it, which is the worse fact about this turn.
+            return "undelivered"
+        return outcome
 
     async def _heads_up_after(self, seconds: float) -> None:
         """Say something in the thread if the turn is still running after `seconds`.
@@ -535,12 +584,25 @@ class JeanSession:
                 exc_info=True,
             )
 
-    async def run_turn(self, text: str) -> None:
+    async def run_turn(self, text: str, *, trigger: str = "human") -> None:
+        """Run one turn. `trigger` labels who asked -- "human" for a Slack
+        message, "schedule" for a cron firing (ScheduleRunner passes it through
+        SessionManager). It is a metrics label only; nothing in the turn behaves
+        differently, and it exists so a token bill can be attributed to people
+        rather than to cron."""
         self._busy = True
         started = time.monotonic()
         self._rounds = 0
         self._tools = 0
         self._spoke = False
+        # Resolved as the turn goes; read by the `finally` block, which is the one
+        # place guaranteed to run whether the turn succeeded, was cancelled, or
+        # raised. "error" is the honest default: if nothing below reassigns it, the
+        # turn did not reach its own end.
+        outcome = "error"
+        usage: dict[str, Any] | None = None
+        cost_usd: float | None = None
+        rate_limited = False
         heads_up: asyncio.Task[None] | None = None
         if self._slow_turn_seconds > 0:
             heads_up = asyncio.create_task(self._heads_up_after(self._slow_turn_seconds))
@@ -619,6 +681,28 @@ class JeanSession:
                         # dump its working thread on the user. The last message is the
                         # answer.
                         final_text = text
+                elif type(msg).__name__ == RESULT_MESSAGE_CLASS_NAME:
+                    # What the turn cost, and how it failed if it did. Read here
+                    # rather than after the loop because the SDK hands it to us
+                    # exactly once, on the way past.
+                    usage = getattr(msg, "usage", None)
+                    cost_usd = getattr(msg, "total_cost_usd", None)
+                    if getattr(msg, "is_error", False):
+                        status = getattr(msg, "api_error_status", None)
+                        if status in RATE_LIMIT_STATUSES:
+                            rate_limited = True
+                elif type(msg).__name__ == RATE_LIMIT_EVENT_CLASS_NAME:
+                    info = getattr(msg, "rate_limit_info", None)
+                    if info is not None:
+                        self._metrics.rate_limit(
+                            # `rate_limit_type` is optional in the SDK, and a None
+                            # label value is rejected by the client library -- which
+                            # would raise here, on the turn's happy path, to report
+                            # a metric. "unknown" keeps the reading.
+                            window=getattr(info, "rate_limit_type", None) or "unknown",
+                            utilization=getattr(info, "utilization", None),
+                            resets_at=getattr(info, "resets_at", None),
+                        )
                 got = getattr(msg, "session_id", None)
                 if got:
                     sid = got
@@ -633,8 +717,25 @@ class JeanSession:
             # either: `spoke` would be False on every turn and this would append the
             # notice to every real reply. Staying quiet is the safe read of "I could not
             # tell"; `_settle`'s count_reliable warning already reports the same fault.
-            if assistant_msgs and not spoke:
-                await self._deliver(final_text)
+            if spoke:
+                outcome = "ok"  # the agent said it itself, through a jean_slack tool
+            elif assistant_msgs:
+                outcome = await self._deliver(final_text)
+            else:
+                # Zero AssistantMessages -- jean deliberately stays quiet here (see
+                # above), so nothing reached the thread at all. From the human's side
+                # that is indistinguishable from a failed post, and it is counted as
+                # one: the answer is missing either way.
+                outcome = "undelivered"
+
+            # Precedence, most user-visible failure first (see the design doc):
+            # `undelivered` outranks `rate_limited`, because an empty thread is a
+            # worse fact than why it is empty. `error` is set by the except path.
+            # Without this, a 429 -- which does not raise, it ends the stream with an
+            # error result and no text -- would be filed as `notice` and blamed on
+            # the prompt.
+            if rate_limited and outcome != "undelivered":
+                outcome = "rate_limited"
 
             if sid is not None:
                 # Bump BEFORE archiving. The order is load-bearing, not tidiness:
@@ -715,15 +816,25 @@ class JeanSession:
             # duration. `spoke=False` means the agent did not call a jean_slack tool
             # and `_deliver` sent its final message instead -- the normal path, not a
             # fault; it is logged because it is also when `upload` cannot have run.
+            elapsed = time.monotonic() - started
             logger.info(
-                "turn done %s/%s secs=%.1f rounds=%d tools=%d spoke=%s",
+                "turn done %s/%s secs=%.1f rounds=%d tools=%d spoke=%s outcome=%s",
                 self._channel,
                 self._thread_ts,
-                time.monotonic() - started,
+                elapsed,
                 self._rounds,
                 self._tools,
                 self._spoke,
+                outcome,
             )
+            # The same facts as the log line, in a shape Prometheus can aggregate.
+            # Here rather than in the `try` so a turn that raised is still counted --
+            # a failure rate that only counts successes is not a failure rate. The
+            # sink is synchronous by contract (see MetricsSink): an await in a
+            # `finally` is a cancellation point, and one here could swallow the
+            # exception on its way out.
+            self._metrics.turn_done(trigger=trigger, outcome=outcome, seconds=elapsed)
+            self._metrics.tokens(trigger=trigger, usage=usage, cost_usd=cost_usd)
             # "" clears the assistant thread status (see slack/client.py).
             await self._chat.set_status(self._channel, self._thread_ts, "")
 

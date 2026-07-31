@@ -23,37 +23,6 @@ TOKEN_KINDS = {
 }
 
 
-class NullMetrics:
-    """Does nothing, satisfies `MetricsSink`.
-
-    The default for every collaborator that takes a sink, so tests and any run
-    that does not scrape wire nothing and no call site needs an `if`.
-    """
-
-    def turn_done(self, *, trigger: str, outcome: str, seconds: float) -> None:
-        pass
-
-    def tokens(self, *, trigger: str, usage: dict[str, Any] | None, cost_usd: float | None) -> None:
-        pass
-
-    def session_started(self) -> None:
-        pass
-
-    def session_resumed(self, *, outcome: str) -> None:
-        pass
-
-    def transcript_incomplete(self) -> None:
-        pass
-
-    def schedule_run(self, *, status: str) -> None:
-        pass
-
-    def rate_limit(
-        self, *, window: str, utilization: float | None, resets_at: float | None
-    ) -> None:
-        pass
-
-
 class PrometheusMetrics:
     """`MetricsSink` backed by a private prometheus_client registry.
 

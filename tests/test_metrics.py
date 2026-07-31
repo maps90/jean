@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from jean.metrics.prometheus import NullMetrics, PrometheusMetrics
+from jean.metrics.null import NullMetrics
+from jean.metrics.prometheus import PrometheusMetrics
 from jean.ports import MetricsSink
 
 

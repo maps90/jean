@@ -2,7 +2,14 @@ from __future__ import annotations
 
 from typing import Any
 
-from prometheus_client import CONTENT_TYPE_LATEST, CollectorRegistry, Counter, Gauge, Histogram
+from prometheus_client import (
+    CONTENT_TYPE_LATEST,
+    CollectorRegistry,
+    Counter,
+    Gauge,
+    Histogram,
+    disable_created_metrics,
+)
 from prometheus_client import generate_latest as _generate_latest
 
 # jean turns run seconds to minutes -- config.py records ~149s for a
@@ -36,6 +43,14 @@ class PrometheusMetrics:
     """
 
     def __init__(self, *, agent: str) -> None:
+        # Drop the `_created` timestamp series prometheus_client attaches to every
+        # counter. They are part of the OpenMetrics spec, essentially never queried,
+        # and they DOUBLE the number of series jean exports -- storage and scrape
+        # payload spent on data no dashboard reads. This is a process-wide toggle in
+        # the library (there is no per-registry switch) and it is idempotent, so
+        # calling it per instance is safe; it changes only the exposition format.
+        disable_created_metrics()
+
         self._agent = agent
         self._registry = CollectorRegistry()
         r = self._registry

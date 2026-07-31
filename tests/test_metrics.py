@@ -206,3 +206,15 @@ def test_registries_are_per_instance_not_global():
         _series(_render(b), "jean_turns_total", agent="damian", trigger="human", outcome="ok")
         is None
     )
+
+
+def test_created_series_are_not_exported():
+    """prometheus_client attaches a `_created` timestamp series to every counter.
+    Nothing queries them and they double jean's series count, so the adapter
+    turns them off -- storage and scrape payload for no dashboard value."""
+    m = PrometheusMetrics(agent="anya")
+    m.turn_done(trigger="human", outcome="ok", seconds=1.0)
+    m.schedule_run(status="ok")
+    text = _render(m)
+
+    assert "_created" not in text

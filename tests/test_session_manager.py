@@ -20,7 +20,7 @@ class FakeSession:
         self.turns: list[str] = []
         self.closed = False
 
-    async def run_turn(self, text: str) -> None:
+    async def run_turn(self, text: str, *, trigger: str = "human") -> None:
         self.turns.append(text)
 
     async def close(self) -> None:
@@ -61,7 +61,7 @@ async def test_thread_lock_serializes_turns_on_the_same_thread():
     order: list[str] = []
 
     class SlowSession(FakeSession):
-        async def run_turn(self, text: str) -> None:
+        async def run_turn(self, text: str, *, trigger: str = "human") -> None:
             order.append(f"{text}-start")
             await asyncio.sleep(0.03)
             order.append(f"{text}-end")

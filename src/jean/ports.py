@@ -31,6 +31,36 @@ class PruneResult:
 
 
 @dataclass
+class Message:
+    """One Slack message, flattened to what the agent actually reads.
+
+    `user` is the raw Slack id -- never a resolved display name. Ids travel
+    through jean as the literal strings Slack gave us, and the raw form renders
+    as a real mention when the agent quotes it back.
+    """
+
+    ts: str
+    user: str
+    text: str
+    thread_ts: str | None = None
+    reply_count: int = 0
+
+
+class ChatReadError(RuntimeError):
+    """A read the chat surface refused. `code` is the provider's own error
+    string (Slack's `not_in_channel`, `channel_not_found`, ...), carried so the
+    tool can hand the agent the real reason instead of an empty result.
+
+    Defined here, in the port module, so `slack/mcp.py` can catch it without
+    importing `slack_sdk` -- the layering rule keeps concrete infra in the
+    adapters."""
+
+    def __init__(self, code: str, message: str | None = None) -> None:
+        super().__init__(message or code)
+        self.code = code
+
+
+@dataclass
 class Schedule:
     id: str
     channel: str
@@ -155,6 +185,21 @@ class ChatSurface(Protocol):
     async def react(self, channel: str, ts: str, emoji: str) -> None: ...
     async def unreact(self, channel: str, ts: str, emoji: str) -> None: ...
     async def set_status(self, channel: str, thread_ts: str, status: str) -> None: ...
+
+    # Reads. Both readers return (messages, has_more) so the caller knows it hit
+    # the limit and can STATE the truncation rather than silently swallow it.
+    async def resolve_channel(self, name_or_id: str) -> str: ...
+    async def history(
+        self,
+        channel: str,
+        *,
+        oldest: float | None = None,
+        latest: float | None = None,
+        limit: int = 50,
+    ) -> tuple[list[Message], bool]: ...
+    async def thread_replies(
+        self, channel: str, thread_ts: str, *, limit: int = 50
+    ) -> tuple[list[Message], bool]: ...
 
 
 @runtime_checkable

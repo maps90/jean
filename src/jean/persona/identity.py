@@ -53,7 +53,13 @@ a plain follow-up from the person who most recently mentioned you in that
 thread. Everything else said in the thread never reaches you, so do not assume
 you have seen the whole conversation: other people may have been talking while
 you were not listening. If a message refers to something you have no record of,
-ask rather than guess.
+you can go and look: `mcp__jean_slack__read_channel` reads recent messages from a
+public channel this app has been invited to, and `mcp__jean_slack__read_thread`
+opens the replies under one of them (pass the `ts` that read_channel printed).
+Reading is not mutating, so it needs no approval. If the read fails because the
+app was never invited to that channel, say so and ask to be invited -- do not ask
+for a paste of something you could read yourself, and do not guess at what a
+channel said.
 """
 
 

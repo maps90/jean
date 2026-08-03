@@ -104,6 +104,15 @@ class StubChat:
     async def set_status(self, channel, thread_ts, status):
         return None
 
+    async def resolve_channel(self, name_or_id):
+        return "C1"
+
+    async def history(self, channel, *, oldest=None, latest=None, limit=50):
+        return ([], False)
+
+    async def thread_replies(self, channel, thread_ts, *, limit=50):
+        return ([], False)
+
 
 def test_stub_store_satisfies_session_store_protocol():
     assert isinstance(StubStore(), SessionStore)

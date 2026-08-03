@@ -59,3 +59,9 @@ def test_compose_system_prompt_names_the_agent():
 
 def test_compose_system_prompt_defaults_to_jean():
     assert "You are jean," in compose_system_prompt("persona")
+
+
+def test_baseline_tells_the_agent_it_can_read_channel_history():
+    composed = compose_system_prompt("persona text")
+    assert "mcp__jean_slack__read_channel" in composed
+    assert "mcp__jean_slack__read_thread" in composed

@@ -72,6 +72,9 @@ Create a Slack app (Socket Mode, not HTTP events) with these OAuth scopes:
 
 - `app_mentions:read` -- so jean notices `@jean` mentions
 - `chat:write` -- to post/edit replies
+- `channels:history` -- to read messages in public channels (`read_channel`,
+  `read_thread`)
+- `channels:read` -- to turn `#channel-name` into the id the API wants
 - `im:history` -- to see DMs
 - `files:write` -- to upload files
 - `reactions:write` -- to react/unreact
@@ -82,6 +85,13 @@ Enable Socket Mode and generate an app-level token (`xapp-...`) with the
 `connections:write` scope, plus a bot token (`xoxb-...`) from the OAuth page.
 Install the app to your workspace, invite the bot to whatever channels it
 should watch, and optionally DM it directly.
+
+Adding scopes requires re-installing the app for them to take effect.
+
+The read tools reach **only public channels the bot has been invited to** --
+Slack refuses everything else, so the invite list is the real control surface.
+Size it knowingly: anything jean can read, jean can be asked to summarize into
+another thread.
 
 ### 4. Run it
 

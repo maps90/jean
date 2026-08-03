@@ -6,7 +6,7 @@ from typing import Any
 
 from slack_sdk.errors import SlackApiError
 
-from jean.ports import ChatReadError
+from jean.ports import ChatReadError, Message
 from jean.slack.mrkdwn import chunk_text, md_to_mrkdwn
 
 # A Slack conversation id, which is passed through untouched. G/D are matched
@@ -14,6 +14,22 @@ from jean.slack.mrkdwn import chunk_text, md_to_mrkdwn
 # agent gets Slack's own honest error rather than a guess made here.
 _CHANNEL_ID = re.compile(r"^[CGD][A-Z0-9]+$")
 _LIST_PAGE = 1000
+
+# Slack allows more, but a bigger page buys context-window pressure, not value.
+READ_LIMIT_MAX = 200
+READ_LIMIT_DEFAULT = 50
+
+
+def _to_message(raw: dict[str, Any]) -> Message:
+    # A bot post carries `bot_id` and usually no `user`; falling back keeps the
+    # line attributed instead of rendering an anonymous message.
+    return Message(
+        ts=str(raw.get("ts") or ""),
+        user=str(raw.get("user") or raw.get("bot_id") or ""),
+        text=str(raw.get("text") or ""),
+        thread_ts=raw.get("thread_ts"),
+        reply_count=int(raw.get("reply_count") or 0),
+    )
 
 
 def _read_error(exc: SlackApiError) -> ChatReadError:
@@ -116,6 +132,50 @@ class SlackSurface:
             f"no public channel named {name_or_id!r} that this app can see -- "
             "check the name, and that the app is installed with channels:read",
         )
+
+    async def history(
+        self,
+        channel: str,
+        *,
+        oldest: float | None = None,
+        latest: float | None = None,
+        limit: int = READ_LIMIT_DEFAULT,
+    ) -> tuple[list[Message], bool]:
+        """A window of channel history, OLDEST FIRST, plus whether more exists.
+
+        Slack returns newest-first; the flip happens here so every consumer
+        reads a conversation top-to-bottom."""
+        kwargs: dict[str, Any] = {
+            "channel": channel,
+            "limit": max(1, min(limit, READ_LIMIT_MAX)),
+        }
+        # Slack wants these as strings of epoch seconds.
+        if oldest is not None:
+            kwargs["oldest"] = f"{oldest:.6f}"
+        if latest is not None:
+            kwargs["latest"] = f"{latest:.6f}"
+        try:
+            resp = await self._client.conversations_history(**kwargs)
+        except SlackApiError as exc:
+            raise _read_error(exc) from exc
+        raw = list(resp.get("messages") or [])
+        raw.reverse()
+        return [_to_message(m) for m in raw], bool(resp.get("has_more"))
+
+    async def replies(
+        self, channel: str, thread_ts: str, *, limit: int = READ_LIMIT_DEFAULT
+    ) -> tuple[list[Message], bool]:
+        """A thread's parent plus its replies. Slack already returns these
+        oldest-first with the parent leading -- do NOT reverse."""
+        try:
+            resp = await self._client.conversations_replies(
+                channel=channel,
+                ts=thread_ts,
+                limit=max(1, min(limit, READ_LIMIT_MAX)),
+            )
+        except SlackApiError as exc:
+            raise _read_error(exc) from exc
+        return [_to_message(m) for m in (resp.get("messages") or [])], bool(resp.get("has_more"))
 
     async def set_status(self, channel: str, thread_ts: str, status: str) -> None:
         # Best-effort Slack nicety: the `assistant:write` scope may be absent,

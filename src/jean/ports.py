@@ -197,7 +197,7 @@ class ChatSurface(Protocol):
         latest: float | None = None,
         limit: int = 50,
     ) -> tuple[list[Message], bool]: ...
-    async def replies(
+    async def thread_replies(
         self, channel: str, thread_ts: str, *, limit: int = 50
     ) -> tuple[list[Message], bool]: ...
 

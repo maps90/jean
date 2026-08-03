@@ -177,13 +177,13 @@ async def test_replies_keep_slack_order_parent_first():
             "has_more": False,
         }
     )
-    messages, _ = await SlackSurface(web).replies("C1", "1754210040.0")
+    messages, _ = await SlackSurface(web).thread_replies("C1", "1754210040.0")
     assert [m.text for m in messages] == ["parent", "answer"]
 
 
 async def test_replies_passes_ts_and_limit():
     web = FakeWeb()
-    await SlackSurface(web).replies("C1", "1754210040.0", limit=10)
+    await SlackSurface(web).thread_replies("C1", "1754210040.0", limit=10)
     call = web.replies_calls[0]
     assert call["channel"] == "C1"
     assert call["ts"] == "1754210040.0"

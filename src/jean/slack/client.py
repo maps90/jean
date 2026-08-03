@@ -162,7 +162,7 @@ class SlackSurface:
         raw.reverse()
         return [_to_message(m) for m in raw], bool(resp.get("has_more"))
 
-    async def replies(
+    async def thread_replies(
         self, channel: str, thread_ts: str, *, limit: int = READ_LIMIT_DEFAULT
     ) -> tuple[list[Message], bool]:
         """A thread's parent plus its replies. Slack already returns these

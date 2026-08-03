@@ -10,6 +10,12 @@
 
 **Spec:** `docs/superpowers/specs/2026-08-03-slack-read-tools-design.md`
 
+> **Deviation during execution:** the port method planned as `ChatSurface.replies`
+> shipped as **`thread_replies`**. `replies` collided with the list a test fake uses
+> to record `reply()` calls, and sitting next to the existing `reply()` writer it read
+> ambiguously. Everything below that says `replies` on `ChatSurface`/`SlackSurface`
+> means `thread_replies`; the *tool* is still named `read_thread`.
+
 ## Global Constraints
 
 - Work in the worktree `.claude/worktrees/slack-read-tools` on branch `slack-read-tools`. All commands below assume that directory.

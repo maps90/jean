@@ -13,6 +13,12 @@ class FakeManager:
         self.calls.append((channel, thread_ts, text))
 
 
+def _turn(author_id: str, text: str) -> str:
+    """What the dispatched turn looks like once the gateway has named the author.
+    The envelope itself is specified in tests/test_dispatch.py."""
+    return f'<slack-author id="{author_id}"/>\n\n{text}'
+
+
 class FakeGate:
     def __init__(self, result: str = "approved"):
         self.result = result
@@ -46,7 +52,7 @@ async def test_on_mention_sets_partner_and_dispatches():
     )
 
     assert await store.get_partner("C1", "111.0") == "U11111"
-    assert manager.calls == [("C1", "111.0", "hey <@UBOT> help me")]
+    assert manager.calls == [("C1", "111.0", _turn("U11111", "hey <@UBOT> help me"))]
 
 
 async def test_on_mention_blocked_author_is_ignored():
@@ -89,7 +95,7 @@ async def test_partner_follow_up_handled_but_a_bystander_is_ignored():
     assert manager.calls == []  # not the partner -> no turn
 
     await gw.on_message("C1", "111.0", "follow-up message", "U11111", False)
-    assert manager.calls == [("C1", "111.0", "follow-up message")]
+    assert manager.calls == [("C1", "111.0", _turn("U11111", "follow-up message"))]
     assert await store.get_partner("C1", "111.0") == "U11111"
 
 
@@ -114,7 +120,7 @@ async def test_dm_message_always_handled_and_sets_partner():
     await gw.on_message("D1", "111.0", "hi jean", "U11111", True)
 
     assert await store.get_partner("D1", "111.0") == "U11111"
-    assert manager.calls == [("D1", "111.0", "hi jean")]
+    assert manager.calls == [("D1", "111.0", _turn("U11111", "hi jean"))]
 
 
 async def test_mention_of_someone_else_clears_the_partner():
@@ -141,7 +147,7 @@ async def test_bystander_mentioning_someone_else_does_not_clear_the_partner():
     assert manager.calls == []
 
     await gw.on_message("C1", "111.0", "follow-up message", "U11111", False)
-    assert manager.calls == [("C1", "111.0", "follow-up message")]
+    assert manager.calls == [("C1", "111.0", _turn("U11111", "follow-up message"))]
 
 
 async def test_on_mention_with_unknown_author_leaves_the_partner_unchanged():

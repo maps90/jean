@@ -77,7 +77,7 @@ Slack (Socket Mode)  ── load-balances events across all connected workers �
 | `session/transcript.py` | Locate/read/write the claude CLI's on-disk transcript for a session id |
 | `session/manager.py` | Per-worker session cache + `ThreadLock` serialization + idle sweep |
 | `gateway/engagement.py` | Pure engagement decision (mention / disengage / DM / reply) |
-| `gateway/dispatch.py` | Inbound message → attachment envelope → session turn |
+| `gateway/dispatch.py` | Inbound message → author + attachment envelope → session turn |
 | `gateway/app.py` | Gateway domain methods + the Slack event/action/command wiring |
 | `plugins/manifest.py` | Parse + sanity-check `jean.json` / `mcp.json` |
 | `plugins/git_resolver.py` | Clone the marketplaces in `jean.json`; find each plugin's dir from its manifest |

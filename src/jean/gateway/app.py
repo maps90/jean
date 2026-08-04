@@ -167,7 +167,13 @@ class Gateway:
         if not decision.handle:
             return
         await self._ack(channel, message_ts)
-        await dispatch(self._manager, channel=channel, thread_ts=thread_ts, text=text)
+        await dispatch(
+            self._manager,
+            channel=channel,
+            thread_ts=thread_ts,
+            text=text,
+            author_id=author_id,
+        )
 
     async def _ack(self, channel: str, message_ts: str | None) -> None:
         """React the instant the message is accepted, so a channel shows the

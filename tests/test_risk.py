@@ -256,3 +256,40 @@ def test_normal_workspace_file_stays_safe_after_broadening():
     path = "/home/jean/workspaces/app/main.py"
     assert classify_risk("Write", {"file_path": path}) is Risk.SAFE
     assert classify_risk("Edit", {"file_path": path}) is Risk.SAFE
+
+
+# --- opening a PR is a proposal, not a production change ---
+@pytest.mark.parametrize(
+    "tool_name",
+    [
+        "mcp__github__create_branch",
+        "mcp__github__create_or_update_file",
+        "mcp__github__push_files",
+        "mcp__github__create_pull_request",
+        # A gateway that namespaces the provider produces the longer id.
+        "mcp__portico__github__create_branch",
+        "mcp__portico__github__create_or_update_file",
+        "mcp__portico__github__push_files",
+        "mcp__portico__github__create_pull_request",
+    ],
+)
+def test_github_pr_preparation_is_safe(tool_name):
+    assert classify_risk(tool_name, {}) is Risk.SAFE
+
+
+@pytest.mark.parametrize(
+    "tool_name",
+    [
+        # What lands or removes a change still asks.
+        "mcp__github__merge_pull_request",
+        "mcp__github__delete_file",
+        "mcp__portico__github__merge_pull_request",
+        "mcp__portico__github__delete_file",
+        # The exemption is anchored, so a longer name is not swept in with it.
+        "mcp__github__create_branch_protection",
+        # Another provider's create is untouched.
+        "mcp__gitlab__create_branch",
+    ],
+)
+def test_other_github_writes_still_ask(tool_name):
+    assert classify_risk(tool_name, {}) is Risk.RISKY

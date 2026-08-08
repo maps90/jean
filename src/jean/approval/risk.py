@@ -180,10 +180,36 @@ _WEB_TOOLS = {"WebFetch", "WebSearch"}
 # actions available on a resource, which is how the agent discovers `restart`
 # before asking to run it. Gating the lookup would mean needing approval merely
 # to find out what could be asked for.
+#
+# `merge` is the same kind of gap, found while exempting the PR-preparation tools
+# below: `merge_pull_request` matched no verb here, so an agent could land a change
+# on a default branch unattended while asking permission to open the PR.
 _MCP_RISK = re.compile(
     r"(delete|apply|rollout|scale|restart|drain|(?<!un)cordon|destroy|create|patch"
     r"|evict|replace|remove|terminate|update|sync|run_\w*_action|trigger"
-    r"|rollback|promote|abort|(?<!un)suspend|resume)",
+    r"|rollback|promote|abort|(?<!un)suspend|resume|merge)",
+    re.IGNORECASE,
+)
+
+# --- GitHub tools that only ever produce a reviewable proposal ---
+#
+# `_MCP_RISK` matches the verb anywhere in the tool id, so every step of opening a
+# pull request read as a production change: `create_branch`, `create_or_update_file`
+# (once PER FILE) and `create_pull_request` each interrupted a human, three or more
+# clicks for one PR. "Always allow" could not absorb it either, because the CLI's
+# suggested rule names one tool and the next step is a different tool.
+#
+# None of these four reach production. A branch, a commit on that branch and a PR
+# are the artifact a human reviews before anything ships, so gating them asks for
+# approval to ask for approval. What actually lands a change still asks:
+# `merge_pull_request` and `delete_*` keep matching `_MCP_RISK` below.
+#
+# Anchored at `$` and requiring the `github__` segment so this exempts the named
+# tools only, under either id shape (`mcp__github__...` direct, or
+# `mcp__<gateway>__github__...` when a gateway namespaces the provider). A new
+# GitHub write tool is RISKY until someone adds it here deliberately.
+_MCP_GITHUB_PROPOSAL = re.compile(
+    r"github__(create_branch|create_or_update_file|push_files|create_pull_request)$",
     re.IGNORECASE,
 )
 
@@ -289,6 +315,8 @@ def classify_risk(tool_name: str, tool_input: dict[str, Any]) -> Risk:
         # Only jean's own Slack tools are in allowed_tools and skip can_use_tool.
         # Every plugin MCP call -- read-only and mutating alike -- reaches here,
         # so a mutation verb in the tool id is what separates RISKY from SAFE.
+        if _MCP_GITHUB_PROPOSAL.search(tool_name):
+            return Risk.SAFE
         return Risk.RISKY if _MCP_RISK.search(tool_name) else Risk.SAFE
 
     return Risk.SAFE
